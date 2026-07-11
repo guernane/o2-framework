@@ -1,0 +1,328 @@
+
+# ==============================================================================
+# o2rc
+# O2Physics shell integration for local machine.
+# Source this file from ~/.bashrc:
+#   source ~/alice/o2rc
+#
+# Provides:
+#   o2              control script (o2.sh in PATH)
+#   o2-shell()      interactive shell inside the container
+#   o2-run()        run a DPL workflow script inside the container
+#   o2-alien()      run alien.py commands from the host
+#   o2-get-aod()    download AOD files from ALICE Grid
+#   o2-version()    show installed O2Physics version
+#   o2-refresh()    regenerate command cache
+#   Tab completion for all o2-* binaries
+#
+# Note: the container wrapper function is named _o2_container() (internal).
+#       "o2" in your shell refers to o2.sh via PATH — not a shell function.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------------------------
+O2_BASE_DIR="$HOME/alice"
+
+_O2_CONFIG="$O2_BASE_DIR/o2_config.sh"
+if [ -f "$_O2_CONFIG" ]; then
+    source "$_O2_CONFIG"
+fi
+
+# On HPC (O2_FORCE_HPC=1), heavy files live on scratch, not HOME
+if [ "${O2_FORCE_HPC:-0}" -eq 1 ] && [ -n "${O2_HPC_SCRATCH_DIR:-}" ]; then
+    _O2_SCRATCH_DIR="$O2_HPC_SCRATCH_DIR"
+else
+    _O2_SCRATCH_DIR="$O2_BASE_DIR"
+fi
+
+O2_SANDBOX="$_O2_SCRATCH_DIR/${O2_SANDBOX_NAME:-sandbox}"
+O2_SW_DIR="$_O2_SCRATCH_DIR/sw"
+O2_TMP_DIR="$_O2_SCRATCH_DIR/tmp"
+O2_FAKEHOME="$_O2_SCRATCH_DIR/fakehome"
+O2_CMD_CACHE="$HOME/.o2_cmds"
+_O2_SUDO="${O2_APPTAINER_SUDO:-}"
+
+# Add ~/alice to PATH so "o2" resolves to o2.sh
+if [[ ":$PATH:" != *":$O2_BASE_DIR:"* ]]; then
+    export PATH="$O2_BASE_DIR:$PATH"
+fi
+
+# Create required directories
+mkdir -p "$O2_FAKEHOME" "$O2_TMP_DIR"
+mkdir -p "$O2_FAKEHOME/.config/alibuild"
+touch "$O2_FAKEHOME/.config/alibuild/disable-analytics"
+
+# Sync ALICE grid certificate into fakehome
+if [ -d "$HOME/.globus" ] && [ "$HOME/.globus" != "$O2_FAKEHOME/.globus" ]; then
+    mkdir -p "$O2_FAKEHOME/.globus"
+    cp -u "$HOME/.globus/usercert.pem" "$O2_FAKEHOME/.globus/" 2>/dev/null || true
+    cp -u "$HOME/.globus/userkey.pem"  "$O2_FAKEHOME/.globus/" 2>/dev/null || true
+    chmod 400 "$O2_FAKEHOME/.globus/userkey.pem" 2>/dev/null || true
+fi
+
+# ------------------------------------------------------------------------------
+# _o2_container
+# Internal container wrapper — used by o2-shell, o2-run, o2-alien, o2-get-aod.
+# NOT intended to be called directly by the user.
+# "o2" in the shell is o2.sh (via PATH), not this function.
+# ------------------------------------------------------------------------------
+_o2_container() {
+    $_O2_SUDO apptainer exec --cleanenv \
+        -B "$O2_SW_DIR:/alice/sw" \
+        -B "$O2_TMP_DIR:/tmp" \
+        -B "$O2_FAKEHOME:/root" \
+        "$O2_SANDBOX" \
+        bash -c '
+            export ALIBUILD_WORK_DIR=/alice/sw
+            export HOME=/root
+            export TMPDIR=/tmp
+            export LANG=en_US.UTF-8
+            export LC_ALL=en_US.UTF-8
+            eval "$(alienv shell-helper)"
+            alienv setenv O2Physics/latest -c "$@"
+        ' -- "$@"
+}
+
+# ------------------------------------------------------------------------------
+# Command cache — list of o2-* binaries available in the O2Physics build
+# ------------------------------------------------------------------------------
+_o2_get_latest() {
+    ls -dt "$O2_SW_DIR/slc9_x86-64/O2Physics/"* 2>/dev/null | head -n 1
+}
+
+_o2_generate_cache() {
+    local LATEST
+    LATEST=$(_o2_get_latest)
+
+    if [ -z "$LATEST" ] || [ ! -d "$LATEST/bin" ]; then
+        echo "[o2rc] No O2Physics build found in $O2_SW_DIR" >&2
+        return 1
+    fi
+
+    # Collect installed binaries only (not staging dir — avoids stale entries)
+    ls "$LATEST/bin"/o2-* 2>/dev/null \
+        | xargs -n1 basename \
+        | sort -u > "$O2_CMD_CACHE"
+
+    echo "[o2rc] Cached $(wc -l < "$O2_CMD_CACHE") O2 commands → $O2_CMD_CACHE"
+}
+
+# ------------------------------------------------------------------------------
+# Tab completion for o2-* commands
+# ------------------------------------------------------------------------------
+_o2_cmd_complete() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local cmd="${COMP_WORDS[0]}"
+
+    # Complete --options by querying the binary's --help
+    if [[ "$cur" == --* ]] && [ "$COMP_CWORD" -gt 0 ]; then
+        local opts
+        opts=$(_o2_container "$cmd" --help 2>/dev/null \
+            | grep -oP '\-\-[a-zA-Z0-9_-]+' | sort -u)
+        [ -n "$opts" ] && COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+        return
+    fi
+
+    [ -f "$O2_CMD_CACHE" ] || { _o2_generate_cache 2>/dev/null || return; }
+    COMPREPLY=( $(compgen -W "$(cat "$O2_CMD_CACHE")" -- "$cur") )
+}
+
+# ------------------------------------------------------------------------------
+# Load all o2-* commands as shell functions (lazy wrapper around _o2_container)
+# ------------------------------------------------------------------------------
+o2-load-commands() {
+    [ -f "$O2_CMD_CACHE" ] || { _o2_generate_cache || return 1; }
+
+    local count=0
+    while IFS= read -r cmd; do
+        # shellcheck disable=SC2140
+        eval "
+$cmd() {
+    _o2_container $cmd \"\$@\"
+}
+complete -F _o2_cmd_complete $cmd
+"
+        count=$(( count + 1 ))
+    done < "$O2_CMD_CACHE"
+
+    echo "[o2rc] $count O2 commands loaded"
+}
+
+# Intercept unknown o2-* commands and lazy-load
+command_not_found_handle() {
+    if [[ "$1" == o2-* ]]; then
+        echo "[o2rc] Loading O2 commands..." >&2
+        o2-load-commands 2>/dev/null
+        if type "$1" &>/dev/null; then
+            "$@"; return $?
+        else
+            echo "[ERROR] Not found in O2Physics build: $1" >&2
+            return 127
+        fi
+    fi
+    echo "bash: $1: command not found" >&2
+    return 127
+}
+
+# Register completion at shell startup (without loading all functions yet)
+_o2_register_completion() {
+    [ -f "$O2_CMD_CACHE" ] || { _o2_generate_cache 2>/dev/null || return; }
+    while IFS= read -r cmd; do
+        complete -F _o2_cmd_complete "$cmd"
+    done < "$O2_CMD_CACHE"
+}
+[ ! -f "$O2_CMD_CACHE" ] && _o2_generate_cache 2>/dev/null || true
+_o2_register_completion
+
+# ------------------------------------------------------------------------------
+# o2-refresh: regenerate cache and reload completion
+# ------------------------------------------------------------------------------
+o2-refresh() {
+    _o2_generate_cache && _o2_register_completion
+}
+
+# ------------------------------------------------------------------------------
+# o2-shell: open an interactive shell inside the container
+# ------------------------------------------------------------------------------
+o2-shell() {
+    $_O2_SUDO apptainer exec --cleanenv \
+        -B "$O2_SW_DIR:/alice/sw" \
+        -B "$O2_TMP_DIR:/tmp" \
+        -B "$O2_FAKEHOME:/root" \
+        "$O2_SANDBOX" \
+        bash --rcfile <(cat << 'RCEOF'
+export ALIBUILD_WORK_DIR=/alice/sw
+export HOME=/root
+export TMPDIR=/tmp
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+eval "$(alienv shell-helper)"
+alienv setenv O2Physics/latest -c bash
+RCEOF
+)
+}
+
+# ------------------------------------------------------------------------------
+# o2-run: run a DPL workflow script inside the container
+#
+# Usage:
+#   o2-run <workflow_script> [data_dir]
+#
+# This is for running a script directly (development/testing).
+# For production use: o2 run <workflow> <production>
+# ------------------------------------------------------------------------------
+o2-run() {
+    local SCRIPT="$1"
+    local DATA_DIR="${2:-$PWD}"
+
+    if [ -z "$SCRIPT" ]; then
+        echo "Usage: o2-run <workflow_script> [data_dir]" >&2
+        return 1
+    fi
+    if [ ! -f "$SCRIPT" ]; then
+        echo "[ERROR] Script not found: $SCRIPT" >&2
+        return 1
+    fi
+
+    local SCRIPT_DIR
+    SCRIPT_DIR="$(dirname "$(realpath "$SCRIPT")")"
+    local SCRIPT_NAME
+    SCRIPT_NAME="$(basename "$SCRIPT")"
+
+    echo "[o2rc] Running: $SCRIPT"
+    echo "[o2rc] Data   : $DATA_DIR"
+
+    $_O2_SUDO apptainer exec --cleanenv \
+        -B "$O2_SW_DIR:/alice/sw" \
+        -B "$O2_TMP_DIR:/tmp" \
+        -B "$O2_FAKEHOME:/root" \
+        -B "${SCRIPT_DIR}:/workdir" \
+        -B "${DATA_DIR}:/data" \
+        "$O2_SANDBOX" \
+        bash -c '
+            export ALIBUILD_WORK_DIR=/alice/sw
+            export HOME=/root
+            export TMPDIR=/tmp
+            export LANG=en_US.UTF-8
+            export LC_ALL=en_US.UTF-8
+            eval "$(alienv shell-helper)"
+            alienv setenv O2Physics/latest -c bash /workdir/'"$SCRIPT_NAME"'
+        '
+}
+
+# ------------------------------------------------------------------------------
+# o2-alien: run any alien.py command from the host
+#
+# Usage:
+#   o2-alien ls /alice/data/2024/LHC24aj/
+#   o2-alien find /alice/data/2024/LHC24aj/000544116 -select AO2D.root
+# ------------------------------------------------------------------------------
+o2-alien() {
+    _o2_container bash -c "alien.py $*" 2>/dev/null
+}
+
+# ------------------------------------------------------------------------------
+# o2-get-aod: quick download of AOD files (wrapper around get_aod.sh)
+#
+# Usage:
+#   o2-get-aod <production> [local_dir] [max_files_per_run]
+#
+# For production use with grouping: o2 run <workflow> <production>
+# ------------------------------------------------------------------------------
+o2-get-aod() {
+    local PRODUCTION="$1"
+    local LOCAL_DIR="${2:-$O2_BASE_DIR/data}"
+    local MAX_FILES="${3:-5}"
+
+    if [ -z "$PRODUCTION" ]; then
+        echo "Usage: o2-get-aod <production> [local_dir] [max_files]" >&2
+        return 1
+    fi
+
+    local SCRIPT="$O2_BASE_DIR/get_aod.sh"
+    if [ ! -f "$SCRIPT" ]; then
+        echo "[ERROR] get_aod.sh not found in $O2_BASE_DIR" >&2
+        return 1
+    fi
+
+    mkdir -p "$LOCAL_DIR"
+
+    $_O2_SUDO apptainer exec --cleanenv \
+        --env O2_PRODUCTION="$PRODUCTION" \
+        --env O2_RUNS="all" \
+        --env O2_MAX_FILES="$MAX_FILES" \
+        --env O2_DATA_MODE="local" \
+        --env O2_GROUP_SIZE="$MAX_FILES" \
+        --env ALICE_CERN_USER="${ALICE_CERN_USER:-guernane}" \
+        -B "$O2_SW_DIR:/alice/sw" \
+        -B "$O2_TMP_DIR:/tmp" \
+        -B "$O2_FAKEHOME:/root" \
+        -B "$(dirname "$SCRIPT"):/workdir_scripts" \
+        -B "$LOCAL_DIR:/data" \
+        -B "$LOCAL_DIR:/output" \
+        "$O2_SANDBOX" \
+        bash -c '
+            export ALIBUILD_WORK_DIR=/alice/sw
+            export HOME=/root
+            export TMPDIR=/tmp
+            export LANG=en_US.UTF-8
+            export LC_ALL=en_US.UTF-8
+            eval "$(alienv shell-helper)"
+            alienv setenv O2Physics/latest -c bash /workdir_scripts/get_aod.sh
+        '
+}
+
+# ------------------------------------------------------------------------------
+# o2-version: show installed O2Physics version
+# ------------------------------------------------------------------------------
+o2-version() {
+    local LATEST
+    LATEST=$(_o2_get_latest)
+    if [ -n "$LATEST" ]; then
+        basename "$LATEST"
+    else
+        echo "[ERROR] No O2Physics build found in $O2_SW_DIR"
+        return 1
+    fi
+}

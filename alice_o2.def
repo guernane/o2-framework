@@ -1,0 +1,80 @@
+Bootstrap: docker
+From: almalinux:9
+
+%labels
+    Author      Guernane
+    Version     4.2
+    Description AlmaLinux 9 base environment for O2Physics (ALICE)
+                O2Physics is built on the host and bind-mounted at runtime.
+
+%post
+    set -e
+
+    # System update and repositories
+    dnf -y install epel-release dnf-plugins-core
+    dnf -y update
+    dnf config-manager --set-enabled crb
+
+    # Development tools
+    dnf groupinstall -y "Development Tools"
+
+    # Remove low-memory-monitor: triggers memory pressure signals
+    # that can kill parallel compilation jobs
+    dnf -y remove low-memory-monitor || true
+
+    # ALICE system dependencies repository
+    tee /etc/yum.repos.d/alice-system-deps.repo > /dev/null << 'REPOEOF'
+[alice-system-deps]
+name=alice-system-deps
+baseurl=https://s3.cern.ch/swift/v1/alibuild-repo/RPMS/o2-full-deps_el9.x86-64/
+enabled=1
+gpgcheck=0
+REPOEOF
+
+    dnf -y update
+    dnf -y install alice-o2-full-deps alibuild git
+
+    # Cleanup
+    dnf clean all
+    rm -rf /var/cache/dnf /tmp/*
+
+    # Generate en_US.UTF-8 locale to avoid setlocale warnings at runtime
+    dnf -y install glibc-langpack-en 2>/dev/null || true
+    localedef -i en_US -f UTF-8 en_US.UTF-8 2>/dev/null || true
+
+    # Disable aliBuild analytics permanently inside the container
+    # aliBuild checks for the existence of this file (even empty) to opt out
+    # This prevents the interactive prompt from blocking unattended builds
+    mkdir -p /root/.config/alibuild
+    touch /root/.config/alibuild/disable-analytics
+
+    # Reset .bashrc to avoid environment contamination from host or build steps
+    # mkdir -p ensures /root exists even if something unexpected happened
+    mkdir -p /root
+    cp /etc/skel/.bashrc /root/.bashrc
+    cp /etc/skel/.bash_profile /root/.bash_profile 2>/dev/null || true
+
+%environment
+    export ALIBUILD_WORK_DIR=${ALIBUILD_WORK_DIR:-$HOME/alice/sw}
+    export TMPDIR=/tmp
+    export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:$PATH
+    export LANG=en_US.UTF-8
+    export LC_ALL=en_US.UTF-8
+
+%runscript
+    # Usage (interactive shell):
+    #   apptainer run -B ~/alice/fakehome:/root -B ~/alice/sw:/alice/sw <sandbox>
+    # Usage (direct command):
+    #   apptainer run -B ~/alice/fakehome:/root -B ~/alice/sw:/alice/sw <sandbox> \
+    #     o2-analysis-trackselection --help
+    export ALIBUILD_WORK_DIR=/alice/sw
+    export TMPDIR=/tmp
+    export LANG=en_US.UTF-8
+    export LC_ALL=en_US.UTF-8
+    eval "$(alienv shell-helper)"
+
+    if [ $# -eq 0 ]; then
+        alienv setenv O2Physics/latest -c /bin/bash ||             { echo "[INFO] O2Physics not found. Build it first."; exec /bin/bash; }
+    else
+        alienv setenv O2Physics/latest -c "$@" ||             { echo "[ERROR] Failed to load O2Physics environment"; exit 1; }
+    fi
