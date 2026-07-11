@@ -42,14 +42,12 @@ source ~/.bashrc
 - Le framework les copiera automatiquement dans `fakehome/.globus/` au
   premier lancement (`common.sh` s'en charge)
 
-### 1.5 Construire le sandbox Apptainer (une seule fois, ~1-2h)
+### 1.5 Construire le sandbox + O2Physics (une seule commande, plusieurs heures)
+`o2 build` gère tout en une fois : construction du sandbox Apptainer (à
+partir de `alice_o2.def`) s'il n'existe pas encore, puis clone/build
+d'O2Physics via aliBuild. Il n'y a pas de sous-commande `sandbox` séparée.
 ```bash
 cd ~/alice
-o2 sandbox build          # utilise alice_o2.def
-```
-
-### 1.6 Premier build O2Physics (long, plusieurs heures)
-```bash
 o2 build
 ```
 
