@@ -96,6 +96,8 @@ _o2_help() {
         merge)  _merge_help;  return ;;
         status) _status_help; return ;;
         deploy) _deploy_help; return ;;
+        backup) source "$SCRIPTS_DIR/lib/backup.sh"; _backup_help; return ;;
+        export) source "$SCRIPTS_DIR/lib/export.sh"; _export_help; return ;;
     esac
 
     cat << 'EOF'
@@ -107,6 +109,8 @@ Commands:
   merge    Merge AnalysisResults.root files from all completed job groups
   status   Monitor analyses, HPC jobs, and ALICE Grid token
   deploy   Sync scripts to HPC and launch a remote build
+  backup   Commit and push all 3 repos to GitHub (local machine only)
+  export   Bundle fresh clones of all 3 repos into a shareable archive (local machine only)
 
 Use 'o2 help <command>' for detailed options.
 
@@ -168,6 +172,24 @@ case "$COMMAND" in
         fi
         source "$SCRIPTS_DIR/lib/analyses.sh"
         cmd_analyses "$@"
+        ;;
+    backup)
+        # backup must run on local machine only
+        if [ "$ENV_TYPE" != "local" ]; then
+            log_error "o2 backup must be run from your local machine"
+            exit 1
+        fi
+        source "$SCRIPTS_DIR/lib/backup.sh"
+        cmd_backup "$@"
+        ;;
+    export)
+        # export must run on local machine only
+        if [ "$ENV_TYPE" != "local" ]; then
+            log_error "o2 export must be run from your local machine"
+            exit 1
+        fi
+        source "$SCRIPTS_DIR/lib/export.sh"
+        cmd_export "$@"
         ;;
     help|-h|--help)
         _o2_help "$@"
