@@ -99,11 +99,13 @@ mv userkey_nopass.pem userkey.pem
 `~/.globus` a les permissions `700` et que ce fichier n'est jamais copié
 hors du cluster.
 
-### 2.6 Build initial sur le cluster
+### 2.6 Build initial sur le cluster (déclenché depuis le PC local)
+Le build sur le cluster n'est jamais lancé en se connectant soi-même en SSH
+puis en tapant la commande sur place — il est déclenché **depuis le PC
+local**, qui pousse le job de build (via OAR) sur le cluster :
 ```bash
-ssh guernanr@dahu.ciment
-cd ~/alice
-o2 build
+# Depuis le PC local, dans ~/alice
+o2 deploy --build-only
 ```
 
 ---
