@@ -60,7 +60,11 @@ cmd_backup() {
 
     _backup_repo "$O2_LOCAL_DIR"              "o2-framework" "$MSG"
     _backup_repo "$O2_LOCAL_DIR/analyses"     "analyses"     "$MSG"
-    _backup_repo "$O2_LOCAL_DIR/sw/O2Physics" "O2Physics"    "$MSG"
+
+    log_info "[O2Physics] skipped — use 'o2 build --commit \"msg\"' instead"
+    log_info "[O2Physics] (aliBuild's MIRROR alternate-object-path setup"
+    log_info "[O2Physics] doesn't tolerate being git-operated on from outside"
+    log_info "[O2Physics] its own working directory context)"
 
     echo "========================================"
     echo "   Backup complete"
