@@ -38,9 +38,16 @@ source ~/.bashrc
 
 ### 1.4 Obtenir le certificat grid ALICE
 - Suivre la procédure CERN CA (voir https://alice-doc.github.io/alice-analysis-tutorial/)
-- Placer `usercert.pem` et `userkey.pem` dans `~/.globus/`
-- Le framework les copiera automatiquement dans `fakehome/.globus/` au
-  premier lancement (`common.sh` s'en charge)
+- Placer `usercert.pem` et `userkey.pem` dans **`~/.globus/`** (le vrai
+  `$HOME` de l'utilisateur — PAS `~/alice/fakehome/.globus/`)
+- ⚠️ Ne jamais placer le certificat directement dans `~/alice/fakehome/.globus/`
+  — ce répertoire est une **copie automatique** gérée par le framework
+  (`common.sh`), régénérée à chaque lancement depuis `~/.globus/`. Toute
+  modification manuelle y serait écrasée / non prise en compte à la source.
+- Le framework copie automatiquement `~/.globus/*.pem` vers
+  `~/alice/fakehome/.globus/` au premier lancement (voir `lib/common.sh`) —
+  c'est ce dernier répertoire qui est bind-monté dans le container Apptainer
+  (`FAKEHOME:/root`), pas `~/.globus/` directement.
 
 ### 1.5 Construire le sandbox + O2Physics (une seule commande, plusieurs heures)
 `o2 build` gère tout en une fois : construction du sandbox Apptainer (à
