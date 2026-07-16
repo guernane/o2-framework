@@ -31,6 +31,7 @@ cmd_run() {
     local DATA_MODE_OVERRIDE=""
     local RESUME=0
     local GROUP_OVERRIDE=""   # internal: set by OAR job script
+    local HPC_MODE=0          # --hpc: drive everything from the local machine
 
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -38,6 +39,7 @@ cmd_run() {
             --mode)    shift; DATA_MODE_OVERRIDE="$1" ;;
             --group)   shift; GROUP_OVERRIDE="$1" ;;
             --resume)  RESUME=1 ;;
+            --hpc)     HPC_MODE=1 ;;
             --help|-h) _run_help; return 0 ;;
             -*)        log_warn "Unknown option: $1" ;;
             *)
@@ -68,9 +70,11 @@ cmd_run() {
     _validate_data_mode
 
     # ---- Inside OAR job: run the assigned group only ----
+    # WORKFLOW_OUTPUT is already fully self-contained (baked + synced from
+    # the local machine) — no need to touch config_tasks.sh / WORKFLOW_DIR
+    # here at all.
     if [ -n "$GROUP_OVERRIDE" ]; then
         load_apptainer
-        _generate_workflow_script "$WORKFLOW" "$PRODUCTION"
         _run_workflow "$WORKFLOW" "$PRODUCTION" "$GROUP_OVERRIDE"
         return
     fi
@@ -88,6 +92,15 @@ cmd_run() {
     _resolve_files   "$WORKFLOW" "$PRODUCTION" "$RUNS" "$RESUME"
     _generate_workflow_script "$WORKFLOW" "$PRODUCTION"
     _init_bookkeeping "$WORKFLOW" "$PRODUCTION" "$RUNS" "$RESUME"
+
+    if [ "$HPC_MODE" -eq 1 ]; then
+        [ "$ENV_TYPE" = "local" ] || {
+            log_error "--hpc must be run from your local machine, not the cluster"
+            exit 1
+        }
+        _run_hpc "$WORKFLOW" "$PRODUCTION" "$RESUME"
+        return
+    fi
 
     if [ "$ENV_TYPE" = "hpc_login" ]; then
         _submit_oar_jobs "$WORKFLOW" "$PRODUCTION" "$RESUME"
@@ -218,6 +231,43 @@ HEADER
 
     chmod +x "$GENERATED"
     log_info "Workflow script: $GENERATED"
+
+    _bake_run_bundle "$WF_NAME" "$PROD"
+}
+
+# ==============================================================================
+# _bake_run_bundle
+# Makes WORKFLOW_OUTPUT fully self-contained, so that running a group never
+# again needs to read anything from WORKFLOW_DIR (analyses/<wf>/) — only
+# from WORKFLOW_OUTPUT, which is the only thing that gets synced to HPC.
+#
+#   - copies dpl-config.json into WORKFLOW_OUTPUT
+#   - applies AdjustJson() now, locally, on that copy (if defined)
+#   - dumps AdjustJson()/Clean() function bodies into WORKFLOW_OUTPUT/.hooks.sh
+#     so _run_workflow() can source them without touching config_tasks.sh
+# ==============================================================================
+_bake_run_bundle() {
+    local WF_NAME="$1"
+    local PROD="$2"
+    local HOOKS_FILE="$WORKFLOW_OUTPUT/.hooks.sh"
+
+    cp "$WORKFLOW_DIR/dpl-config.json" "$WORKFLOW_OUTPUT/dpl-config.json"
+
+    {
+        type AdjustJson &>/dev/null && declare -f AdjustJson
+        type Clean      &>/dev/null && declare -f Clean
+    } > "$HOOKS_FILE"
+
+    # Apply AdjustJson now, locally, against the baked copy — /analysis
+    # inside AdjustJson() traditionally refers to the bind-mounted dir,
+    # which will now BE WORKFLOW_OUTPUT at run time, so operating directly
+    # on WORKFLOW_OUTPUT here produces an identical result.
+    if type AdjustJson &>/dev/null; then
+        ( cd "$WORKFLOW_OUTPUT" && AdjustJson ) || \
+            log_warn "AdjustJson() failed while baking bundle — dpl-config.json left as-is"
+    fi
+
+    log_info "Bundle baked: $WORKFLOW_OUTPUT (self-contained, ready to sync)"
 }
 
 # ==============================================================================
@@ -229,9 +279,12 @@ HEADER
 #   /tmp      → TMP_DIR
 #   /root     → FAKEHOME
 #   /workdir  → GROUP_DIR  (filelist.txt + AnalysisResults.root land here)
-#   /analysis → WORKFLOW_DIR (dpl-config.json, config_tasks.sh)
+#   /analysis → WORKFLOW_OUTPUT (dpl-config.json, run_generated.sh, .hooks.sh —
+#               fully self-contained; analyses/<wf>/ itself is never needed
+#               here, which is what makes syncing to HPC lightweight)
 #   /data     → DATA_BASE  (local AOD files)
-#   /output   → WORKFLOW_OUTPUT (run_generated.sh is here)
+#   /output   → WORKFLOW_OUTPUT (same dir as /analysis; kept as a separate
+#               bind point for backward-compatible path references)
 # ==============================================================================
 _run_workflow() {
     local WF_NAME="$1"
@@ -254,13 +307,12 @@ _run_workflow() {
 
     _update_group_bookkeeping "$WF_NAME" "$PROD" "$GROUP_TAG" "running" "${OAR_JOB_ID:-}"
 
-    # Source config_tasks.sh on HOST to get AdjustJson() and Clean()
+    # Source pre-baked hooks from WORKFLOW_OUTPUT (self-contained — never
+    # reads config_tasks.sh / WORKFLOW_DIR here). AdjustJson() was already
+    # applied once, at generation time, in _bake_run_bundle(); only Clean()
+    # needs to run per-execution.
     # shellcheck source=/dev/null
-    source "$WORKFLOW_DIR/config_tasks.sh" 2>/dev/null || true
-
-    # Pre-run: AdjustJson modifies dpl-config.json on HOST before container starts
-    # (dpl-config.json is in WORKFLOW_DIR which is bind-mounted as /analysis)
-    type AdjustJson &>/dev/null && AdjustJson || true
+    source "$WORKFLOW_OUTPUT/.hooks.sh" 2>/dev/null || true
 
     # Pre-run cleanup (HOST side)
     type Clean &>/dev/null && Clean 1 || true
@@ -268,7 +320,7 @@ _run_workflow() {
     local EXIT_CODE=0
     _o2_container \
         -B "$GROUP_DIR:/workdir" \
-        -B "$WORKFLOW_DIR:/analysis" \
+        -B "$WORKFLOW_OUTPUT:/analysis" \
         -B "$DATA_BASE:/data" \
         -B "$WORKFLOW_OUTPUT:/output" \
         -- bash /output/run_generated.sh /workdir/filelist.txt /workdir \
@@ -323,10 +375,104 @@ _run_groups_local() {
 }
 
 # ==============================================================================
-# _submit_oar_jobs
-# Submit one OAR job per group + one merge job.
-# OAR dependency syntax: oarsub -a <job_id> (one -a per dependency)
+# _run_hpc
+# Drives an HPC run entirely from the local machine:
+#   1. WORKFLOW_OUTPUT is already resolved + generated + baked (self-contained)
+#      by the time this is called — see cmd_run.
+#   2. rsync ONLY that directory to the cluster (never all of analyses/).
+#   3. ssh into the cluster and trigger OAR submission remotely, via a
+#      lightweight command that doesn't need analyses/config_*.sh at all.
 # ==============================================================================
+_run_hpc() {
+    local WF_NAME="$1"
+    local PROD="$2"
+    local RESUME="${3:-0}"
+
+    [ -n "${O2_HPC_SCRATCH_DIR:-}" ] || {
+        log_error "O2_HPC_SCRATCH_DIR must be set in o2_config.sh for --hpc"
+        log_error "(WORKFLOW_OUTPUT resolves under \$SCRATCH on the cluster," \
+                   "which falls back to O2_HPC_HOME_DIR only if unset — a" \
+                   "case this remote path computation does not handle)"
+        exit 1
+    }
+
+    # WORKFLOW_OUTPUT resolves under $SCRATCH on the cluster (see
+    # _resolve_workflow_paths in common.sh: SCRATCH_ANALYSES uses $SCRATCH,
+    # not $O2_HPC_HOME_DIR — only WORKFLOW_DIR/config files live under HOME,
+    # with a symlink pointing to the scratch output). $SCRATCH resolves to
+    # $O2_HPC_SCRATCH_DIR whenever that variable is set in o2_config.sh.
+    local REMOTE_OUTPUT="${WORKFLOW_OUTPUT/#$O2_LOCAL_DIR/$O2_HPC_SCRATCH_DIR}"
+    local REMOTE_HOST="${O2_HPC_USER}@${O2_HPC_HOST}"
+
+    log_sep
+    log_info "Syncing workflow bundle to HPC..."
+    log_info "Local  : $WORKFLOW_OUTPUT"
+    log_info "Remote : ${REMOTE_HOST}:${REMOTE_OUTPUT}"
+
+    ssh "$REMOTE_HOST" "mkdir -p '$(dirname "$REMOTE_OUTPUT")'" || {
+        log_error "Failed to prepare remote directory over SSH"
+        exit 1
+    }
+
+    rsync -a --delete "$WORKFLOW_OUTPUT/" "${REMOTE_HOST}:${REMOTE_OUTPUT}/" || {
+        log_error "rsync of workflow bundle failed"
+        exit 1
+    }
+    log_info "Bundle synced"
+
+    log_info "Triggering remote OAR submission..."
+    local RESUME_FLAG=""
+    [ "$RESUME" -eq 1 ] && RESUME_FLAG="--resume"
+
+    ssh "$REMOTE_HOST" \
+        "${O2_HPC_HOME_DIR}/o2.sh submit-remote ${WF_NAME} ${PROD} --mode ${O2_DATA_MODE} ${RESUME_FLAG}"
+
+    log_sep
+    log_info "o2 run --hpc complete — jobs submitted from the cluster login node"
+    log_info "Monitor with: ssh ${REMOTE_HOST} '${O2_HPC_HOME_DIR}/o2.sh status ${WF_NAME} ${PROD}'"
+    log_sep
+}
+
+# ==============================================================================
+# cmd_submit_remote
+# Runs ON the HPC login node (invoked over SSH by _run_hpc, never by hand).
+# Submits OAR jobs for a workflow bundle that has already been synced —
+# never reads analyses/config_input.sh or config_tasks.sh.
+#
+# Usage: o2 submit-remote <workflow> <production> --mode <mode> [--resume]
+# ==============================================================================
+cmd_submit_remote() {
+    local WF_NAME="$1"; shift
+    local PROD="$1"; shift
+    local RESUME=0
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --mode)   shift; O2_DATA_MODE="$1" ;;
+            --resume) RESUME=1 ;;
+        esac
+        shift
+    done
+
+    [ -z "$WF_NAME" ] && { log_error "workflow name required"; exit 1; }
+    [ -z "$PROD"    ] && { log_error "production name required"; exit 1; }
+    [ -z "${O2_DATA_MODE:-}" ] && { log_error "--mode required (submit-remote never reads config_input.sh)"; exit 1; }
+    _validate_data_mode
+
+    _resolve_workflow_paths "$WF_NAME" "$PROD"
+
+    local N_GROUPS_FILE="$WORKFLOW_OUTPUT/.n_groups"
+    [ -f "$N_GROUPS_FILE" ] || {
+        log_error "No synced bundle found at $WORKFLOW_OUTPUT (.n_groups missing) — was the bundle rsynced?"
+        exit 1
+    }
+    N_GROUPS=$(cat "$N_GROUPS_FILE")
+
+    log_info "Remote submission: $WF_NAME / $PROD ($N_GROUPS group(s), mode=$O2_DATA_MODE)"
+    _submit_oar_jobs "$WF_NAME" "$PROD" "$RESUME"
+}
+
+
 _submit_oar_jobs() {
     local WF_NAME="$1"
     local PROD="$2"
@@ -369,7 +515,7 @@ _submit_oar_jobs() {
 command -v apptainer &>/dev/null || module load apptainer 2>/dev/null || \
     module load singularity 2>/dev/null
 
-${SCRIPTS_DIR}/o2.sh run ${WF_NAME} ${PROD} --group ${GROUP_TAG}
+${SCRIPTS_DIR}/o2.sh run ${WF_NAME} ${PROD} --group ${GROUP_TAG} --mode ${O2_DATA_MODE}
 OAREOF
         chmod +x "$OAR_SCRIPT"
 

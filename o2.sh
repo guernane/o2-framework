@@ -191,6 +191,11 @@ case "$COMMAND" in
         source "$SCRIPTS_DIR/lib/export.sh"
         cmd_export "$@"
         ;;
+    submit-remote)
+        # internal: invoked over SSH by 'o2 run --hpc', never by hand
+        source "$SCRIPTS_DIR/lib/run.sh"
+        cmd_submit_remote "$@"
+        ;;
     help|-h|--help)
         _o2_help "$@"
         ;;
