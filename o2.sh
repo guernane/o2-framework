@@ -98,6 +98,8 @@ _o2_help() {
         deploy) _deploy_help; return ;;
         backup) source "$SCRIPTS_DIR/lib/backup.sh"; _backup_help; return ;;
         export) source "$SCRIPTS_DIR/lib/export.sh"; _export_help; return ;;
+        clean)  source "$SCRIPTS_DIR/lib/clean.sh";  _clean_help;  return ;;
+        list)   source "$SCRIPTS_DIR/lib/clean.sh";  _list_help;   return ;;
     esac
 
     cat << 'EOF'
@@ -111,6 +113,8 @@ Commands:
   deploy   Sync scripts to HPC and launch a remote build
   backup   Commit and push all 3 repos to GitHub (local machine only)
   export   Bundle fresh clones of all 3 repos into a shareable archive (local machine only)
+  list     Show existing data / outputs / builds, local and/or remote
+  clean    Remove old data, run outputs, or O2Physics dev-builds, local and/or remote
 
 Use 'o2 help <command>' for detailed options.
 
@@ -195,6 +199,14 @@ case "$COMMAND" in
         # internal: invoked over SSH by 'o2 run --hpc', never by hand
         source "$SCRIPTS_DIR/lib/run.sh"
         cmd_submit_remote "$@"
+        ;;
+    clean)
+        source "$SCRIPTS_DIR/lib/clean.sh"
+        cmd_clean "$@"
+        ;;
+    list)
+        source "$SCRIPTS_DIR/lib/clean.sh"
+        cmd_list "$@"
         ;;
     help|-h|--help)
         _o2_help "$@"
