@@ -11,27 +11,34 @@ _clean_help() {
     cat << 'EOF'
 o2 clean data    [<production>]            (--all|--keep N) (--local|--remote|--both) [--dry-run]
 o2 clean outputs [<workflow>/<production>] (--all|--keep N) (--local|--remote|--both) [--dry-run]
-o2 clean builds  [<dev-local-name>]        (--all|--keep N) (--local|--remote|--both) [--dry-run]
+o2 clean builds  (--local|--remote|--both) [--dry-run] [--aggressive]
 
 Three independent categories:
   data      Downloaded AO2D files (data/<production>/) — only relevant when
             using O2_DATA_MODE=local; irrelevant in alien mode.
   outputs   Run output directories (analyses/<wf>/output/<production>/).
-  builds    O2Physics aliBuild dev-package versions
-            (sw/slc9_x86-64/O2Physics/dev-local*). The version currently
-            pointed to by the "latest" symlink is never removed.
+  builds    Delegates to aliBuild's own native 'aliBuild clean' command
+            (run inside the container), which safely removes everything
+            NOT referenced by a "latest-*" symlink — this covers old
+            dev-local* package versions as well as sw/BUILD/, sw/TARS/,
+            sw/INSTALLROOT/ leftovers that a hand-rolled cleanup would
+            miss or could corrupt. Pass --aggressive for aliBuild's
+            --aggressive-cleanup (frees more space, but can break cached
+            builds that reference removed tarballs — see aliBuild issue
+            alisw/alibuild#412). No --all/--keep/<name> for this category:
+            aliBuild's clean is holistic, not selective by version.
 
-Use 'o2 list' first to see what exists (exact names, sizes, dates) before
-choosing what to remove.
+Use 'o2 list' first to see what exists (exact names, sizes, dates) for the
+data and outputs categories before choosing what to remove.
 
-Selecting what to remove:
+Selecting what to remove (data / outputs only):
   <name>      Remove exactly that one item. Cannot be combined with --both.
-  --all       Remove everything in the category (except the active build,
-              for the 'builds' category, which is never removed).
+  --all       Remove everything in the category.
   --keep N    Remove everything except the N most recently modified items.
 
-This command executes immediately by default. Pass --dry-run to preview
-what would be removed without deleting anything.
+data/outputs execute immediately by default; pass --dry-run to preview.
+builds always runs aliBuild's own --dry-run first unless you omit it — see
+above (aliBuild's dry-run is native, not a wrapper approximation).
 
 --local/--remote/--both is mandatory — there is no default, to avoid
 accidentally acting on the wrong machine.
@@ -41,9 +48,10 @@ Examples:
   o2 clean outputs test/LHC22o --local
   o2 clean outputs --keep 3 --local
   o2 clean outputs --all --remote --dry-run
-  o2 clean builds dev-local3 --local
-  o2 clean builds --keep 2 --remote
   o2 clean data LHC22o --local
+  o2 clean builds --local --dry-run
+  o2 clean builds --local
+  o2 clean builds --remote --aggressive
 EOF
 }
 
@@ -141,7 +149,31 @@ _clean_remove_one() {
 }
 
 # ------------------------------------------------------------------------------
-# _clean_category_local — handles one category, local machine
+# _clean_builds_local
+# Delegates entirely to aliBuild's own native 'aliBuild clean' command,
+# run inside the container. Verified against alibuild_helpers/clean.py:
+# aliBuild's decideClean() removes $workDir/TMP, $workDir/INSTALLROOT,
+# any $workDir/BUILD/* not referenced by a BUILD/*-latest* symlink, and
+# any $workDir/<arch>/<package>/<version> not referenced by that package's
+# own latest* symlink (covers our dev-local* dirs) — plus, with
+# --aggressive-cleanup, $workDir/TARS/<arch>/store and $workDir/SOURCES.
+# This is more complete and more trustworthy than a hand-rolled rm -rf on
+# just dev-local* (which would miss BUILD/, INSTALLROOT/, etc.).
+# ------------------------------------------------------------------------------
+_clean_builds_local() {
+    local DRY_RUN="$1"
+    local AGGRESSIVE="$2"
+
+    local ARGS=(clean --work-dir /alice/sw)
+    [ "$DRY_RUN" -eq 1 ]    && ARGS+=(--dry-run)
+    [ "$AGGRESSIVE" -eq 1 ] && ARGS+=(--aggressive-cleanup)
+
+    load_apptainer
+    _o2_container_raw -- aliBuild "${ARGS[@]}"
+}
+
+# ------------------------------------------------------------------------------
+# _clean_category_local — handles the data/outputs categories, local machine
 # args: $1 CATEGORY  $2 NAME(may be empty)  $3 ALL(0|1)  $4 KEEP(may be empty)
 #       $5 DRY_RUN(0|1)
 # ------------------------------------------------------------------------------
@@ -252,23 +284,47 @@ cmd_clean() {
     local KEEP=""
     local WHERE=""
     local DRY_RUN=0
+    local AGGRESSIVE=0
 
     while [ $# -gt 0 ]; do
         case "$1" in
-            --all)      ALL=1 ;;
-            --keep)     shift; KEEP="$1" ;;
-            --local)    WHERE="local" ;;
-            --remote)   WHERE="remote" ;;
-            --both)     WHERE="both" ;;
-            --dry-run)  DRY_RUN=1 ;;
-            --help|-h)  _clean_help; return 0 ;;
-            --*)        log_warn "Unknown option: $1" ;;
-            *)          NAME="$1" ;;
+            --all)        ALL=1 ;;
+            --keep)       shift; KEEP="$1" ;;
+            --local)      WHERE="local" ;;
+            --remote)     WHERE="remote" ;;
+            --both)       WHERE="both" ;;
+            --dry-run)    DRY_RUN=1 ;;
+            --aggressive) AGGRESSIVE=1 ;;
+            --help|-h)    _clean_help; return 0 ;;
+            --*)          log_warn "Unknown option: $1" ;;
+            *)            NAME="$1" ;;
         esac
         shift
     done
 
     [ -z "$WHERE" ] && { log_error "specify --local, --remote, or --both (no default, by design)"; exit 1; }
+
+    if [ "$CATEGORY" = "builds" ]; then
+        [ -n "$NAME" ] && { log_error "'builds' does not take a <name> — it delegates to aliBuild's own clean"; exit 1; }
+        if [ "$ALL" -eq 1 ] || [ -n "$KEEP" ]; then
+            log_error "'builds' does not support --all/--keep — it delegates to aliBuild's own clean"
+            exit 1
+        fi
+
+        local REMOTE_HOST="${O2_HPC_USER}@${O2_HPC_HOST}"
+        if [ "$WHERE" = "local" ] || [ "$WHERE" = "both" ]; then
+            log_step "Local — builds (aliBuild clean)"
+            _clean_builds_local "$DRY_RUN" "$AGGRESSIVE"
+        fi
+        if [ "$WHERE" = "remote" ] || [ "$WHERE" = "both" ]; then
+            log_step "Remote — builds (aliBuild clean)"
+            local REMOTE_ARGS=(builds --local)
+            [ "$DRY_RUN" -eq 1 ]    && REMOTE_ARGS+=(--dry-run)
+            [ "$AGGRESSIVE" -eq 1 ] && REMOTE_ARGS+=(--aggressive)
+            ssh "$REMOTE_HOST" "$O2_HPC_HOME_DIR/o2.sh" clean "${REMOTE_ARGS[@]}"
+        fi
+        return
+    fi
 
     if [ -n "$NAME" ]; then
         [ "$WHERE" = "both" ] && { log_error "a specific <name> does not support --both — pick --local or --remote"; exit 1; }
