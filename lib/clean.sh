@@ -107,11 +107,11 @@ _clean_print_active_versions() {
     O2_VERSIONS="$(_o2_container_raw -- alienv q "^O2/" 2>/dev/null)"
     O2PHYSICS_VERSIONS="$(_o2_container_raw -- alienv q "^O2Physics/" 2>/dev/null)"
 
-    local O2_ACTIVE O2PHYSICS_ACTIVE
-    O2_ACTIVE="$(echo "$O2_VERSIONS" | grep -i "::latest\b" || echo "$O2_VERSIONS" | tail -1)"
+    local O2PHYSICS_ACTIVE
     O2PHYSICS_ACTIVE="$(echo "$O2PHYSICS_VERSIONS" | grep -iE "::latest(-dev-o2)?$" | tail -1)"
 
-    log_info "  O2         : ${O2_ACTIVE:-unknown}"
+    log_info "  O2 (latest* tags):"
+    echo "$O2_VERSIONS" | grep -iE "::latest" | sed 's/^/    /'
     log_info "  O2Physics  : ${O2PHYSICS_ACTIVE:-unknown}"
 
     if [ -d "$O2_LOCAL_DIR/sw/O2Physics/.git" ]; then
