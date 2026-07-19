@@ -79,6 +79,9 @@ _clean_list_outputs_local() {
 _clean_list_builds_local() {
     local O2DIR="$O2_LOCAL_DIR/sw/slc9_x86-64/O2Physics"
     [ -d "$O2DIR" ] || return
+
+    _clean_print_active_versions
+
     local ACTIVE
     ACTIVE="$(readlink -f "$O2DIR/latest" 2>/dev/null || readlink -f "$O2DIR/latest-dev-o2" 2>/dev/null)"
     find "$O2DIR" -mindepth 1 -maxdepth 1 -type d -name "dev-local*" 2>/dev/null \
@@ -87,6 +90,37 @@ _clean_list_builds_local() {
             [ "$(readlink -f "$d")" = "$ACTIVE" ] && MARK="ACTIVE"
             printf "%s\t%s\t%s\t%s\t%s\n" "$(date -r "$d" '+%Y-%m-%d %H:%M')" "$(du -sh "$d" 2>/dev/null | cut -f1)" "$(basename "$d")" "$d" "$MARK"
         done | sort -r
+}
+
+# ------------------------------------------------------------------------------
+# _clean_print_active_versions
+# Prints a short summary of the currently active O2 and O2Physics versions,
+# using alienv q (the same modulefile system aliBuild itself relies on) as
+# the authoritative source, plus the O2Physics fork's current git branch
+# and commit (since it's a dev package, tracked in git, not just a tag).
+# ------------------------------------------------------------------------------
+_clean_print_active_versions() {
+    log_info "Active versions:"
+
+    load_apptainer
+    local O2_VERSIONS O2PHYSICS_VERSIONS
+    O2_VERSIONS="$(_o2_container_raw -- alienv q "^O2/" 2>/dev/null)"
+    O2PHYSICS_VERSIONS="$(_o2_container_raw -- alienv q "^O2Physics/" 2>/dev/null)"
+
+    local O2_ACTIVE O2PHYSICS_ACTIVE
+    O2_ACTIVE="$(echo "$O2_VERSIONS" | grep -i "::latest\b" || echo "$O2_VERSIONS" | tail -1)"
+    O2PHYSICS_ACTIVE="$(echo "$O2PHYSICS_VERSIONS" | grep -iE "::latest(-dev-o2)?$" | tail -1)"
+
+    log_info "  O2         : ${O2_ACTIVE:-unknown}"
+    log_info "  O2Physics  : ${O2PHYSICS_ACTIVE:-unknown}"
+
+    if [ -d "$O2_LOCAL_DIR/sw/O2Physics/.git" ]; then
+        local BRANCH COMMIT
+        BRANCH="$(git -C "$O2_LOCAL_DIR/sw/O2Physics" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+        COMMIT="$(git -C "$O2_LOCAL_DIR/sw/O2Physics" log -1 --format='%h %s' 2>/dev/null)"
+        log_info "  fork branch: $BRANCH ($COMMIT)"
+    fi
+    echo ""
 }
 
 # ------------------------------------------------------------------------------
