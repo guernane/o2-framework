@@ -122,6 +122,19 @@ o2 list outputs --local           # a single category
 o2 list builds --remote
 ```
 
+`o2 list builds` additionally reports the currently active O2 and
+O2Physics versions before the detailed listing, using `alienv q` (the
+same modulefile system aliBuild itself relies on) as the authoritative
+source, together with the O2Physics fork's current git branch and commit:
+```
+[INFO]    Active versions:
+[INFO]      O2 (latest* tags):
+    VO_ALICE@O2::latest
+    VO_ALICE@O2::latest-dev-o2
+[INFO]      O2Physics  : VO_ALICE@O2Physics::latest-dev-o2
+[INFO]      fork branch: dev (572c4a9 [PWGHF] Fix normalisation ...)
+```
+
 ### 1.11 `o2 clean` *(local or remote, or both)*
 Removes items in the same three categories. Executes immediately by
 default; pass `--dry-run` to preview without deleting.
