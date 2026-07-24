@@ -86,7 +86,7 @@ O2_LOCAL_DIR="$HOME/alice"
 # Create at: GitHub → Settings → Developer settings → Fine-grained tokens
 # ------------------------------------------------------------------------------
 O2_GITHUB_USER="guernane"
-O2_GITHUB_TOKEN="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"
+O2_GITHUB_TOKEN=""
 O2_DEV_BRANCH="dev"
 O2_PHYSICS_COMPONENTS="PWGJE/Tasks"
 
