@@ -87,6 +87,10 @@ O2_LOCAL_DIR="$HOME/alice"
 # ------------------------------------------------------------------------------
 O2_GITHUB_USER="guernane"
 O2_GITHUB_TOKEN=""
+GITHUB_TOKEN=$(cat ~/.o2_github_token 2>/dev/null) || {
+  echo "ERROR: GitHub token not found in ~/.o2_github_token" >&2
+  exit 1
+}
 O2_DEV_BRANCH="dev"
 O2_PHYSICS_COMPONENTS="PWGJE/Tasks"
 
