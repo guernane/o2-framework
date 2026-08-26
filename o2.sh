@@ -64,7 +64,7 @@ source "$CONFIG_FILE"
 # Order matters: common first (defines helpers used by all others)
 # ==============================================================================
 LIB_DIR="$SCRIPTS_DIR/lib"
-for mod in common build run merge status deploy; do
+for mod in common build run merge status deploy tools; do
     MOD_FILE="$LIB_DIR/${mod}.sh"
     if [ ! -f "$MOD_FILE" ]; then
         echo "[ERROR] Module not found: $MOD_FILE"
@@ -100,6 +100,7 @@ _o2_help() {
         export) source "$SCRIPTS_DIR/lib/export.sh"; _export_help; return ;;
         clean)  source "$SCRIPTS_DIR/lib/clean.sh";  _clean_help;  return ;;
         list)   source "$SCRIPTS_DIR/lib/clean.sh";  _list_help;   return ;;
+        tools) _tools_help; return ;;
     esac
 
     cat << 'EOF'
@@ -114,7 +115,8 @@ Commands:
   backup   Commit and push all 3 repos to GitHub (local machine only)
   export   Bundle fresh clones of all 3 repos into a shareable archive (local machine only)
   list     Show existing data / outputs / builds, local and/or remote
-  clean    Remove old data, run outputs, or O2Physics dev-builds, local and/or remote
+  clean    Remove old data
+  tools    Run ALICE O2 toolkit (lint, format, diag, ...), run outputs, or O2Physics dev-builds, local and/or remote
 
 Use 'o2 help <command>' for detailed options.
 
@@ -158,6 +160,9 @@ case "$COMMAND" in
             exit 1
         fi
         cmd_deploy "$@"
+        ;;
+    tools)
+        cmd_tools "$@"
         ;;
     sync)
         # sync check must run on local machine only
