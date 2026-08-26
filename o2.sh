@@ -64,7 +64,7 @@ source "$CONFIG_FILE"
 # Order matters: common first (defines helpers used by all others)
 # ==============================================================================
 LIB_DIR="$SCRIPTS_DIR/lib"
-for mod in common build run merge status deploy tools; do
+for mod in common build run merge status deploy tools list; do
     MOD_FILE="$LIB_DIR/${mod}.sh"
     if [ ! -f "$MOD_FILE" ]; then
         echo "[ERROR] Module not found: $MOD_FILE"
@@ -99,7 +99,7 @@ _o2_help() {
         backup) source "$SCRIPTS_DIR/lib/backup.sh"; _backup_help; return ;;
         export) source "$SCRIPTS_DIR/lib/export.sh"; _export_help; return ;;
         clean)  source "$SCRIPTS_DIR/lib/clean.sh";  _clean_help;  return ;;
-        list)   source "$SCRIPTS_DIR/lib/clean.sh";  _list_help;   return ;;
+        list)   source "$SCRIPTS_DIR/lib/list.sh";   _list_help;   return ;;
         tools) _tools_help; return ;;
     esac
 
