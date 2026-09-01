@@ -1,0 +1,93 @@
+# ==============================================================================
+# workflows.yml
+# Workflow dependency database for the "proxies" analysis.
+# Inspired by Run3AnalysisValidation/exec/workflows.yml
+#
+# This file documents the DPL workflows, their dependencies and options.
+# It serves as reference and can be used to auto-generate pipelines.
+#
+# Activate workflows in config_tasks.sh (DOO2_* switches).
+# ==============================================================================
+
+options:
+  global:
+    - "-b"                                # batch mode (no GUI)
+    - "--shm-segment-size 16000000000"    # shared memory for large jobs
+    - "--aod-memory-rate-limit 600000000" # AOD memory rate limit
+  local:
+    - "--min-failure-level error"         # suppress warnings in batch
+
+workflows:
+
+  # ----------------------------------------------------------------------------
+  # Infrastructure — required for Run 3 data
+  # ----------------------------------------------------------------------------
+
+  o2-analysis-timestamp:
+    description: "Attach timestamps to collisions (required for CCDB access)"
+    dependencies: []
+    requires_mc: false
+
+  o2-analysis-track-propagation:
+    description: "Propagate tracks to primary vertex (required for Run 3)"
+    dependencies:
+      - o2-analysis-timestamp
+    requires_mc: false
+
+  o2-analysis-event-selection:
+    description: "Apply standard event selection (TVX, sel8, etc.)"
+    dependencies:
+      - o2-analysis-timestamp
+    requires_mc: false
+
+  o2-analysis-multiplicity-table:
+    description: "Compute multiplicity estimators (FT0, FV0, etc.)"
+    dependencies:
+      - o2-analysis-timestamp
+      - o2-analysis-event-selection
+    requires_mc: false
+
+  o2-analysis-trackselection:
+    description: "Apply standard track quality selections"
+    dependencies:
+      - o2-analysis-track-propagation
+    requires_mc: false
+
+  # ----------------------------------------------------------------------------
+  # Jet framework
+  # ----------------------------------------------------------------------------
+
+  o2-analysis-je-jet-finder-charged:
+    description: "Find charged-particle jets using anti-kT algorithm"
+    dependencies:
+      - o2-analysis-timestamp
+      - o2-analysis-track-propagation
+      - o2-analysis-event-selection
+      - o2-analysis-trackselection
+    requires_mc: false
+    options:
+      default: "--jetRadius 0.4"
+
+  o2-analysis-je-jet-track-qa:
+    description: "QA histograms for tracks used in jet finding"
+    dependencies:
+      - o2-analysis-je-jet-finder-charged
+    requires_mc: false
+
+  o2-analysis-je-jet-validation-qa-charged:
+    description: "Validation QA for charged jets"
+    dependencies:
+      - o2-analysis-je-jet-finder-charged
+    requires_mc: false
+
+  # ----------------------------------------------------------------------------
+  # User tasks (PWGJE/Tasks/ in your O2Physics fork)
+  # Add your custom tasks here as you develop them.
+  # ----------------------------------------------------------------------------
+
+  o2-analysis-je-proxy-builder:
+    description: "Build b-jet proxy variables for tagging studies"
+    dependencies:
+      - o2-analysis-je-jet-finder-charged
+      - o2-analysis-trackselection
+    requires_mc: false

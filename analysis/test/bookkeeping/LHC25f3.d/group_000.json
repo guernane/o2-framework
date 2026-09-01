@@ -1,0 +1,10 @@
+{
+  "group": "group_000",
+  "status": "done",
+  "oar_id": null,
+  "n_files": 2,
+  "filelist": "/home/guernane/alice/analyses/test/output/LHC25f3/group_000/filelist.txt",
+  "output": "/home/guernane/alice/analyses/test/output/LHC25f3/group_000/AnalysisResults.root",
+  "updated": "2026-07-10T21:15:13Z",
+  "exit_code": 0
+}

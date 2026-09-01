@@ -1,0 +1,4 @@
+# Liste des tâches à compiler et déployer
+# Format: nom_du_fichier_sans_extension  nom_dpl
+# Commenter avec # pour désactiver
+# myNewTask  je-my-new-task

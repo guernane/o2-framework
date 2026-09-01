@@ -1,0 +1,11 @@
+{
+  "workflow": "test",
+  "production": "LHC25f3",
+  "data_mode": "alien",
+  "group_size": 10,
+  "runs": "544013",
+  "scan_date": "2026-07-16T11:10:15Z",
+  "n_groups": 1,
+  "groups": {},
+  "merge": null
+}
