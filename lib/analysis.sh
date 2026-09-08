@@ -1,13 +1,13 @@
-# lib/analyses.sh
-# Manage analyses registry (analyses.json) and sync user tasks to O2Physics.
+# lib/analysis.sh
+# Manage analysis registry (analysis.json) and sync user tasks to O2Physics.
 #
 # Sourced by o2.sh — never executed directly.
 
 # ==============================================================================
-# cmd_analyses
-# Entry point for: o2 analyses [options]
+# cmd_analysis
+# Entry point for: o2 analysis [options]
 # ==============================================================================
-cmd_analyses() {
+cmd_analysis() {
     local ACTION=""
     local TARGET=""
 
@@ -16,35 +16,35 @@ cmd_analyses() {
             --list)            ACTION="list"   ; shift ;;
             --enable)          ACTION="enable" ; TARGET="$2" ; shift 2 ;;
             --disable)         ACTION="disable"; TARGET="$2" ; shift 2 ;;
-            --help|-h)         _analyses_help  ; return ;;
-            *) log_error "Unknown option: $1" ; _analyses_help ; return 1 ;;
+            --help|-h)         _analysis_help  ; return ;;
+            *) log_error "Unknown option: $1" ; _analysis_help ; return 1 ;;
         esac
     done
 
-    local REGISTRY="$O2_LOCAL_DIR/analyses/analyses.json"
+    local REGISTRY="$O2_LOCAL_DIR/analysis/analysis.json"
     if [ ! -f "$REGISTRY" ]; then
-        log_error "analyses.json not found at $REGISTRY"
-        log_error "Run: cd ~/alice/analyses && git pull"
+        log_error "analysis.json not found at $REGISTRY"
+        log_error "Run: cd ~/alice/analysis && git pull"
         return 1
     fi
 
     case "$ACTION" in
-        list)    _analyses_list    "$REGISTRY" ;;
-        enable)  _analyses_toggle  "$REGISTRY" "$TARGET" true  ;;
-        disable) _analyses_toggle  "$REGISTRY" "$TARGET" false ;;
-        *)       _analyses_list    "$REGISTRY" ;;
+        list)    _analysis_list    "$REGISTRY" ;;
+        enable)  _analysis_toggle  "$REGISTRY" "$TARGET" true  ;;
+        disable) _analysis_toggle  "$REGISTRY" "$TARGET" false ;;
+        *)       _analysis_list    "$REGISTRY" ;;
     esac
 }
 
 # ==============================================================================
-# _analyses_list
+# _analysis_list
 # Display all analyses and their tasks with enabled/disabled state.
 # ==============================================================================
-_analyses_list() {
+_analysis_list() {
     local REGISTRY="$1"
 
     log_sep
-    log_info "Analyses registry: $REGISTRY"
+    log_info "Analysis registry: $REGISTRY"
     log_sep
 
     python3 - "$REGISTRY" << 'PYEOF'
@@ -53,7 +53,7 @@ import sys, json
 with open(sys.argv[1]) as f:
     data = json.load(f)
 
-for analysis in data.get("analyses", []):
+for analysis in data.get("analysis", []):
     name        = analysis.get("name", "?")
     enabled     = analysis.get("enabled", False)
     description = analysis.get("description", "")
@@ -78,14 +78,14 @@ PYEOF
 }
 
 # ==============================================================================
-# _analyses_toggle
+# _analysis_toggle
 # Enable or disable an analysis or a specific task.
 #
 # TARGET formats:
 #   "test"                    → toggle entire analysis
 #   "test/testTask.cxx"       → toggle specific task in analysis
 # ==============================================================================
-_analyses_toggle() {
+_analysis_toggle() {
     local REGISTRY="$1"
     local TARGET="$2"
     local STATE="$3"   # true or false
@@ -106,7 +106,7 @@ analysis_name = parts[0]
 task_file     = parts[1] if len(parts) > 1 else None
 
 found = False
-for analysis in data.get("analyses", []):
+for analysis in data.get("analysis", []):
     if analysis.get("name") != analysis_name:
         continue
     found = True
@@ -149,18 +149,18 @@ PYEOF
     local RC=$?
     if [ $RC -eq 0 ]; then
         log_info "Registry updated: $REGISTRY"
-        log_info "Run 'o2 analyses --list' to verify"
+        log_info "Run 'o2 analysis --list' to verify"
         log_info "Run 'o2 build --rebuild-tasks' to recompile"
     fi
     return $RC
 }
 
 # ==============================================================================
-# _analyses_get_enabled_tasks
-# Read analyses.json and print "analysis_name task.cxx dpl-name" for each
+# _analysis_get_enabled_tasks
+# Read analysis.json and print "analysis_name task.cxx dpl-name" for each
 # enabled task in each enabled analysis. Used by _rebuild_tasks().
 # ==============================================================================
-_analyses_get_enabled_tasks() {
+_analysis_get_enabled_tasks() {
     local REGISTRY="$1"
 
     python3 - "$REGISTRY" << 'PYEOF'
@@ -169,7 +169,7 @@ import sys, json
 with open(sys.argv[1]) as f:
     data = json.load(f)
 
-for analysis in data.get("analyses", []):
+for analysis in data.get("analysis", []):
     if not analysis.get("enabled", False):
         continue
     name = analysis.get("name", "")
@@ -181,11 +181,11 @@ PYEOF
 }
 
 # ==============================================================================
-# _analyses_add_task
-# Add a new task entry to an analysis in analyses.json.
+# _analysis_add_task
+# Add a new task entry to an analysis in analysis.json.
 # Called by _rebuild_tasks when a task file exists but is not yet registered.
 # ==============================================================================
-_analyses_add_task() {
+_analysis_add_task() {
     local REGISTRY="$1"
     local ANALYSIS="$2"
     local FILE="$3"
@@ -199,7 +199,7 @@ registry_path, analysis_name, task_file, dpl_name = sys.argv[1:]
 with open(registry_path) as f:
     data = json.load(f)
 
-for analysis in data.get("analyses", []):
+for analysis in data.get("analysis", []):
     if analysis.get("name") != analysis_name:
         continue
     tasks = analysis.setdefault("tasks", [])
@@ -209,7 +209,7 @@ for analysis in data.get("analyses", []):
         sys.exit(0)
     tasks.append({"file": task_file, "dpl": dpl_name, "enabled": False})
     print(f"[INFO]    Registered new task: {analysis_name}/{task_file} (disabled by default)")
-    print(f"[INFO]    Enable with: o2 analyses --enable {analysis_name}/{task_file}")
+    print(f"[INFO]    Enable with: o2 analysis --enable {analysis_name}/{task_file}")
     break
 
 with open(registry_path, "w") as f:
@@ -218,11 +218,11 @@ with open(registry_path, "w") as f:
 PYEOF
 }
 
-_analyses_help() {
+_analysis_help() {
     cat << 'EOF'
-o2 analyses [options]
+o2 analysis [options]
 
-Manage the analyses registry (analyses.json).
+Manage the analysis registry (analysis.json).
 
 Options:
   --list                       list all analyses and tasks with their state
@@ -235,11 +235,11 @@ Target formats:
   test/testTask.cxx            specific task within an analysis
 
 Examples:
-  o2 analyses --list
-  o2 analyses --enable  test
-  o2 analyses --disable proxies
-  o2 analyses --enable  proxies/taskProxyBuilder.cxx
-  o2 analyses --disable test/testTask.cxx
+  o2 analysis --list
+  o2 analysis --enable  test
+  o2 analysis --disable proxies
+  o2 analysis --enable  proxies/taskProxyBuilder.cxx
+  o2 analysis --disable test/testTask.cxx
 
 After enabling tasks, rebuild with:
   o2 build --rebuild-tasks

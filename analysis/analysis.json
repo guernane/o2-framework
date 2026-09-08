@@ -1,14 +1,14 @@
 {
-  "analyses": [
+  "analysis": [
     {
       "name": "test",
-      "enabled": true,
+      "enabled": false,
       "description": "Pipeline validation test",
       "tasks": [
         {
           "file": "testTask.cxx",
           "dpl": "test-task",
-          "enabled": true
+          "enabled": false
         }
       ]
     },

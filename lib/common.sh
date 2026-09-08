@@ -88,27 +88,27 @@ _resolve_workflow_paths() {
     local PROD="$2"
 
     if [ "$ENV_TYPE" = "local" ]; then
-        WORKFLOW_DIR="$O2_LOCAL_DIR/analyses/$WF_NAME"
-        local SCRATCH_ANALYSES="$O2_LOCAL_DIR/analyses"
+        WORKFLOW_DIR="$O2_LOCAL_DIR/analysis/$WF_NAME"
+        local SCRATCH_ANALYSIS="$O2_LOCAL_DIR/analysis"
     else
-        WORKFLOW_DIR="$O2_HPC_HOME_DIR/analyses/$WF_NAME"
-        local SCRATCH_ANALYSES="$SCRATCH/analyses"
+        WORKFLOW_DIR="$O2_HPC_HOME_DIR/analysis/$WF_NAME"
+        local SCRATCH_ANALYSIS="$SCRATCH/analysis"
     fi
 
-    WORKFLOW_OUTPUT="$SCRATCH_ANALYSES/$WF_NAME/output/$PROD"
+    WORKFLOW_OUTPUT="$SCRATCH_ANALYSIS/$WF_NAME/output/$PROD"
     BOOKKEEPING_DIR="$WORKFLOW_DIR/bookkeeping"
     BOOKKEEPING_FILE="$BOOKKEEPING_DIR/${PROD}.json"
     BOOKKEEPING_FRAGS="$BOOKKEEPING_DIR/${PROD}.d"
 
     mkdir -p "$WORKFLOW_OUTPUT" "$BOOKKEEPING_DIR" "$BOOKKEEPING_FRAGS"
 
-    # On HPC: symlink ~/alice/analyses/<wf>/output → scratch
+    # On HPC: symlink ~/alice/analysis/<wf>/output → scratch
     if [ "$ENV_TYPE" != "local" ]; then
         local LINK="$WORKFLOW_DIR/output"
         if [ ! -L "$LINK" ]; then
             mkdir -p "$WORKFLOW_DIR"
-            ln -s "$SCRATCH_ANALYSES/$WF_NAME/output" "$LINK"
-            log_info "Created symlink: $LINK → $SCRATCH_ANALYSES/$WF_NAME/output"
+            ln -s "$SCRATCH_ANALYSIS/$WF_NAME/output" "$LINK"
+            log_info "Created symlink: $LINK → $SCRATCH_ANALYSIS/$WF_NAME/output"
         fi
     fi
 }

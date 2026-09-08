@@ -64,7 +64,7 @@ source "$CONFIG_FILE"
 # Order matters: common first (defines helpers used by all others)
 # ==============================================================================
 LIB_DIR="$SCRIPTS_DIR/lib"
-for mod in common build run merge status deploy tools list; do
+for mod in common build run merge status deploy tools list analysis; do
     MOD_FILE="$LIB_DIR/${mod}.sh"
     if [ ! -f "$MOD_FILE" ]; then
         echo "[ERROR] Module not found: $MOD_FILE"
@@ -91,15 +91,16 @@ _o2_help() {
     local TOPIC="${1:-}"
 
     case "$TOPIC" in
-        build)  _build_help;  return ;;
-        run)    _run_help;    return ;;
-        merge)  _merge_help;  return ;;
-        status) _status_help; return ;;
-        deploy) _deploy_help; return ;;
-        backup) source "$SCRIPTS_DIR/lib/backup.sh"; _backup_help; return ;;
-        export) source "$SCRIPTS_DIR/lib/export.sh"; _export_help; return ;;
-        clean)  source "$SCRIPTS_DIR/lib/clean.sh";  _clean_help;  return ;;
-        list)   source "$SCRIPTS_DIR/lib/list.sh";   _list_help;   return ;;
+        build)    _build_help;  return ;;
+        run)      _run_help;    return ;;
+        merge)    _merge_help;  return ;;
+        status)   _status_help; return ;;
+        deploy)   _deploy_help; return ;;
+        backup)   source "$SCRIPTS_DIR/lib/backup.sh";   _backup_help; return ;;
+        export)   source "$SCRIPTS_DIR/lib/export.sh";   _export_help; return ;;
+        clean)    source "$SCRIPTS_DIR/lib/clean.sh";    _clean_help;  return ;;
+        list)     source "$SCRIPTS_DIR/lib/list.sh";     _list_help;   return ;;
+	analysis) source "$SCRIPTS_DIR/lib/analysis.sh"; _analysis_help; return ;;
         tools) _tools_help; return ;;
     esac
 
@@ -173,14 +174,14 @@ case "$COMMAND" in
         source "$SCRIPTS_DIR/lib/sync.sh"
         cmd_sync "$@"
         ;;
-    analyses)
+    analysis)
         # analyses management must run on local machine only
         if [ "$ENV_TYPE" != "local" ]; then
-            log_error "o2 analyses must be run from your local machine"
+            log_error "o2 analysis must be run from your local machine"
             exit 1
         fi
-        source "$SCRIPTS_DIR/lib/analyses.sh"
-        cmd_analyses "$@"
+        source "$SCRIPTS_DIR/lib/analysis.sh"
+        cmd_analysis "$@"
         ;;
     backup)
         # backup must run on local machine only

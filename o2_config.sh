@@ -29,7 +29,7 @@
 #     ├── sw/
 #     ├── tmp/
 #     ├── fakehome/
-#     └── analyses/
+#     └── analysis/
 #         └── proxies/
 #             ├── config_input.sh
 #             ├── config_tasks.sh
@@ -46,7 +46,7 @@
 #     ├── get_aod.sh
 #     ├── lib/
 #     ├── logs/
-#     └── analyses/
+#     └── analysis/
 #         └── proxies/
 #             ├── config_input.sh
 #             ├── config_tasks.sh
@@ -60,7 +60,7 @@
 #     ├── tmp/
 #     ├── fakehome/
 #     ├── data/
-#     └── analyses/
+#     └── analysis/
 #         └── proxies/
 #             └── output/
 #                 └── LHC24aj/
@@ -145,5 +145,5 @@ O2_DEPLOY_FILES=(
     "o2rc"
     "get_aod.sh"
     "lib"
-    "analyses"
+    "analysis"
 )

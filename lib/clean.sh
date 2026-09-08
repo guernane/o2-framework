@@ -16,7 +16,7 @@ o2 clean builds  (--local|--remote|--both) [--dry-run] [--aggressive]
 Three independent categories:
   data      Downloaded AO2D files (data/<production>/) — only relevant when
             using O2_DATA_MODE=local; irrelevant in alien mode.
-  outputs   Run output directories (analyses/<wf>/output/<production>/).
+  outputs   Run output directories (analysis/<wf>/output/<production>/).
   builds    Delegates to aliBuild's own native 'aliBuild clean' command
             (run inside the container), which safely removes everything
             NOT referenced by a "latest-*" symlink — this covers old
@@ -137,7 +137,7 @@ _clean_path_for_name() {
         outputs)
             local WF="${NAME%%/*}"
             local PROD="${NAME#*/}"
-            echo "$O2_LOCAL_DIR/analyses/$WF/output/$PROD"
+            echo "$O2_LOCAL_DIR/analysis/$WF/output/$PROD"
             ;;
         builds)
             echo "$O2_LOCAL_DIR/sw/slc9_x86-64/O2Physics/$NAME"

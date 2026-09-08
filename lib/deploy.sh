@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==============================================================================
 # lib/deploy.sh
-# Synchronize scripts and analyses from local machine to HPC cluster.
+# Synchronize scripts and analysis from local machine to HPC cluster.
 # Generates a sanitized o2_config.sh for HPC (no GitHub token).
 # Sourced by o2.sh — never executed directly.
 #
@@ -124,7 +124,7 @@ _deploy_gen_config() {
 
 # ==============================================================================
 # _deploy_sync
-# rsync scripts and analyses to HPC.
+# rsync scripts and analysis to HPC.
 # The sanitized config replaces o2_config.sh on the cluster.
 # ==============================================================================
 _deploy_sync() {

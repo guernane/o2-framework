@@ -104,10 +104,10 @@ _read_bookkeeping() {
 
     if _is_local_machine && [ "$USE_LOCAL" -eq 0 ]; then
         ssh "${O2_HPC_USER}@${O2_HPC_HOST}" \
-            "cat ${O2_HPC_HOME_DIR}/analyses/${WF}/bookkeeping/${PROD}.json 2>/dev/null" \
+            "cat ${O2_HPC_HOME_DIR}/analysis/${WF}/bookkeeping/${PROD}.json 2>/dev/null" \
             2>/dev/null
     else
-        cat "$O2_LOCAL_DIR/analyses/$WF/bookkeeping/${PROD}.json" 2>/dev/null
+        cat "$O2_LOCAL_DIR/analysis/$WF/bookkeeping/${PROD}.json" 2>/dev/null
     fi
 }
 
@@ -120,11 +120,11 @@ _read_fragments() {
 
     if _is_local_machine && [ "$USE_LOCAL" -eq 0 ]; then
         ssh "${O2_HPC_USER}@${O2_HPC_HOST}" \
-            "for f in ${O2_HPC_HOME_DIR}/analyses/${WF}/bookkeeping/${PROD}.d/*.json; do
+            "for f in ${O2_HPC_HOME_DIR}/analysis/${WF}/bookkeeping/${PROD}.d/*.json; do
                  [ -f \"\$f\" ] && cat \"\$f\"; echo '---FRAG_SEP---'
              done 2>/dev/null" 2>/dev/null
     else
-        local FRAG_DIR="$O2_LOCAL_DIR/analyses/$WF/bookkeeping/${PROD}.d"
+        local FRAG_DIR="$O2_LOCAL_DIR/analysis/$WF/bookkeeping/${PROD}.d"
         for f in "$FRAG_DIR"/*.json; do
             [ -f "$f" ] || continue
             cat "$f"
@@ -318,13 +318,13 @@ _status_all() {
         # List from HPC via SSH
         local ANALYSES
         ANALYSES=$(ssh "${O2_HPC_USER}@${O2_HPC_HOST}" \
-            "ls ${O2_HPC_HOME_DIR}/analyses/ 2>/dev/null" 2>/dev/null)
+            "ls ${O2_HPC_HOME_DIR}/analysis/ 2>/dev/null" 2>/dev/null)
 
         while IFS= read -r wf; do
             [ -z "$wf" ] && continue
             local PRODS
             PRODS=$(ssh "${O2_HPC_USER}@${O2_HPC_HOST}" \
-                "ls ${O2_HPC_HOME_DIR}/analyses/${wf}/bookkeeping/*.json \
+                "ls ${O2_HPC_HOME_DIR}/analysis/${wf}/bookkeeping/*.json \
                  | xargs -n1 basename 2>/dev/null | sed 's/\.json//'" 2>/dev/null)
             while IFS= read -r prod; do
                 [ -z "$prod" ] && continue
@@ -354,8 +354,8 @@ _status_sync() {
     log_info "Syncing bookkeeping from ${O2_HPC_USER}@${O2_HPC_HOST} ..."
 
     rsync -avz --checksum \
-        "${O2_HPC_USER}@${O2_HPC_HOST}:${O2_HPC_HOME_DIR}/analyses/" \
-        "$O2_LOCAL_DIR/analyses/" \
+        "${O2_HPC_USER}@${O2_HPC_HOST}:${O2_HPC_HOME_DIR}/analysis/" \
+        "$O2_LOCAL_DIR/analysis/" \
         --include="*/" \
         --include="bookkeeping/" \
         --include="bookkeeping/*.json" \

@@ -516,10 +516,10 @@ EOF
 
 # ==============================================================================
 # _rebuild_tasks
-# Scan all analyses directories, copy enabled tasks to O2Physics, update
+# Scan all analysis directories, copy enabled tasks to O2Physics, update
 # CMakeLists.txt, then run an incremental aliBuild.
 #
-# Each analysis directory under $O2_LOCAL_DIR/analyses/ (except template/)
+# Each analysis directory under $O2_LOCAL_DIR/analysis/ (except template/)
 # may contain:
 #   code/Tasks/*.cxx        — task source files
 #   enabled_tasks.txt       — list of tasks to activate (name  dpl-name)
@@ -529,24 +529,24 @@ EOF
 #   # myOtherTask    je-other-task       # commented = inactive
 # ==============================================================================
 _rebuild_tasks() {
-    log_step "Syncing user tasks from analyses/ to O2Physics..."
+    log_step "Syncing user tasks from analysis/ to O2Physics..."
 
-    local ANALYSES_DIR="$O2_LOCAL_DIR/analyses"
+    local ANALYSIS_DIR="$O2_LOCAL_DIR/analysis"
     local O2PHYSICS_TASKS="$SW_DIR/O2Physics/$O2_PHYSICS_COMPONENTS"
     local CMAKEFILE="$SW_DIR/O2Physics/$O2_PHYSICS_COMPONENTS/CMakeLists.txt"
     local TASKS_COPIED=0
     local TASKS_SKIPPED=0
 
-    local REGISTRY="$ANALYSES_DIR/analyses.json"
+    local REGISTRY="$ANALYSIS_DIR/analysis.json"
 
-    if [ ! -d "$ANALYSES_DIR" ]; then
-        log_error "analyses/ directory not found at $ANALYSES_DIR"
+    if [ ! -d "$ANALYSIS_DIR" ]; then
+        log_error "analysis/ directory not found at $ANALYSIS_DIR"
         return 1
     fi
 
     if [ ! -f "$REGISTRY" ]; then
-        log_error "analyses.json not found at $REGISTRY"
-        log_error "Run: cd ~/alice/analyses && git pull"
+        log_error "analysis.json not found at $REGISTRY"
+        log_error "Run: cd ~/alice/analysis && git pull"
         return 1
     fi
 
@@ -555,16 +555,16 @@ _rebuild_tasks() {
         return 1
     fi
 
-    # Source analyses.sh for helper functions
-    source "$SCRIPTS_DIR/lib/analyses.sh"
+    # Source analysis.sh for helper functions
+    source "$SCRIPTS_DIR/lib/analysis.sh"
 
     # Get enabled tasks from registry
     local ENABLED_TASKS
-    ENABLED_TASKS=$(_analyses_get_enabled_tasks "$REGISTRY")
+    ENABLED_TASKS=$(_analysis_get_enabled_tasks "$REGISTRY")
 
     if [ -z "$ENABLED_TASKS" ]; then
-        log_warn "No tasks enabled in analyses.json"
-        log_warn "Use 'o2 analyses --enable <analysis>' to activate tasks"
+        log_warn "No tasks enabled in analysis.json"
+        log_warn "Use 'o2 analysis --enable <analysis>' to activate tasks"
         return 0
     fi
 
@@ -577,7 +577,7 @@ _rebuild_tasks() {
         DPL_NAME=$(  echo "$LINE" | awk '{print $3}')
         TASK_NAME="${TASK_FILE%.cxx}"
 
-        local SRC="$ANALYSES_DIR/$ANALYSIS/code/Tasks/$TASK_FILE"
+        local SRC="$ANALYSIS_DIR/$ANALYSIS/code/Tasks/$TASK_FILE"
         local DST="$O2PHYSICS_TASKS/$TASK_FILE"
 
         if [ ! -f "$SRC" ]; then
@@ -616,7 +616,7 @@ CMAKEOF
     log_info "Tasks synced: $TASKS_COPIED copied, $TASKS_SKIPPED skipped"
 
     if [ "$TASKS_COPIED" -eq 0 ] && [ "$TASKS_SKIPPED" -eq 0 ]; then
-        log_warn "No tasks activated — check enabled_tasks.txt in your analyses/"
+        log_warn "No tasks activated — check enabled_tasks.txt in your analysis/"
         return 0
     fi
 

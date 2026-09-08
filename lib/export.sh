@@ -20,42 +20,42 @@ local working copy) and bundles them into a single .tar.gz archive.
 Any file committed and pushed to GitHub is automatically picked up on the
 next export — nothing to update in this script when you add new files.
 The only filtering below applies to O2Physics (too large to include whole)
-and to per-workflow run artifacts in analyses/ (output/, bookkeeping/ —
+and to per-workflow run artifacts in analysis/ (output/, bookkeeping/ —
 these are run results, not source, and are excluded by default).
 
 Options:
   --repos "a,b,c"            Which repos to include. Default: all three.
-                             Choices: o2-framework, analyses, O2Physics
+                             Choices: o2-framework, O2Physics
   --o2physics-paths "..."    Top-level O2Physics dirs to keep.
                              Default: "PWGJE,Common". Use "ALL" for everything.
-  --analyses-paths "..."     Top-level analyses/ dirs to keep (e.g. just one
-                             workflow). Default: "ALL" (analyses/ is small).
-  --keep-artifacts           Keep output/ and bookkeeping/ dirs in analyses/
+  --analysis-paths "..."     Top-level analysis/ dirs to keep (e.g. just one
+                             workflow). Default: "ALL" (analysis/ is small).
+  --keep-artifacts           Keep output/ and bookkeeping/ dirs in analysis/
                              (excluded by default — these are run results).
 
 Default output: ~/alice_export_<timestamp>.tar.gz
 
 Examples:
   o2 export
-  o2 export --repos "o2-framework,analyses"
+  o2 export --repos "o2-framework"
   o2 export --o2physics-paths "PWGJE,PWGCF,Common"
-  o2 export --analyses-paths "test"
+  o2 export --analysis-paths "test"
   o2 export --keep-artifacts
 EOF
 }
 
 cmd_export() {
     local OUT=""
-    local REPOS="o2-framework,analyses,O2Physics"
+    local REPOS="o2-framework,O2Physics"
     local O2PHYSICS_PATHS="PWGJE,Common"
-    local ANALYSES_PATHS="ALL"
+    local ANALYSIS_PATHS="ALL"
     local KEEP_ARTIFACTS=0
 
     while [ $# -gt 0 ]; do
         case "$1" in
             --repos)             REPOS="$2"; shift 2 ;;
             --o2physics-paths)   O2PHYSICS_PATHS="$2"; shift 2 ;;
-            --analyses-paths)    ANALYSES_PATHS="$2"; shift 2 ;;
+            --analysis-paths)    ANALYSIS_PATHS="$2"; shift 2 ;;
             --keep-artifacts)    KEEP_ARTIFACTS=1; shift ;;
             *)                   OUT="$1"; shift ;;
         esac
@@ -86,29 +86,29 @@ cmd_export() {
                 rm -rf "$TMP_DIR/o2-framework/.git"
                 BUNDLE_DIRS+=("o2-framework")
                 ;;
-            analyses)
-                log_info "Cloning guernane/analyses..."
-                gh repo clone guernane/analyses "$TMP_DIR/analyses" -- --depth 1 -q
-                rm -rf "$TMP_DIR/analyses/.git"
+            analysis)
+                log_info "Cloning guernane/analysis..."
+                gh repo clone guernane/analysis "$TMP_DIR/analysis" -- --depth 1 -q
+                rm -rf "$TMP_DIR/analysis/.git"
 
-                if [ "$ANALYSES_PATHS" != "ALL" ]; then
+                if [ "$ANALYSIS_PATHS" != "ALL" ]; then
                     local KEEP_ARGS=()
-                    IFS=',' read -ra KEEP_DIRS <<< "$ANALYSES_PATHS"
+                    IFS=',' read -ra KEEP_DIRS <<< "$ANALYSIS_PATHS"
                     for d in "${KEEP_DIRS[@]}"; do
                         KEEP_ARGS+=(! -name "$d")
                     done
-                    KEEP_ARGS+=(! -name "analyses.json" ! -name "README.md")
-                    find "$TMP_DIR/analyses" -mindepth 1 -maxdepth 1 "${KEEP_ARGS[@]}" -exec rm -rf {} +
-                    log_info "analyses/ trimmed to: $ANALYSES_PATHS"
+                    KEEP_ARGS+=(! -name "analysis.json" ! -name "README.md")
+                    find "$TMP_DIR/analysis" -mindepth 1 -maxdepth 1 "${KEEP_ARGS[@]}" -exec rm -rf {} +
+                    log_info "analysis/ trimmed to: $ANALYSIS_PATHS"
                 fi
 
                 if [ "$KEEP_ARTIFACTS" -eq 0 ]; then
-                    find "$TMP_DIR/analyses" -mindepth 2 -maxdepth 2 \
+                    find "$TMP_DIR/analysis" -mindepth 2 -maxdepth 2 \
                         \( -name "output" -o -name "bookkeeping" \) -exec rm -rf {} +
-                    log_info "analyses/: excluded output/ and bookkeeping/ (run artifacts)"
+                    log_info "analysis/: excluded output/ and bookkeeping/ (run artifacts)"
                 fi
 
-                BUNDLE_DIRS+=("analyses")
+                BUNDLE_DIRS+=("analysis")
                 ;;
             O2Physics)
                 log_info "Cloning guernane/O2Physics (dev branch, shallow)..."
@@ -131,7 +131,7 @@ cmd_export() {
                 BUNDLE_DIRS+=("O2Physics")
                 ;;
             *)
-                log_error "Unknown repo in --repos: '$r' (expected: o2-framework, analyses, O2Physics)"
+                log_error "Unknown repo in --repos: '$r' (expected: o2-framework, O2Physics)"
                 exit 1
                 ;;
         esac

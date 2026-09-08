@@ -238,7 +238,7 @@ HEADER
 # ==============================================================================
 # _bake_run_bundle
 # Makes WORKFLOW_OUTPUT fully self-contained, so that running a group never
-# again needs to read anything from WORKFLOW_DIR (analyses/<wf>/) — only
+# again needs to read anything from WORKFLOW_DIR (analysis/<wf>/) — only
 # from WORKFLOW_OUTPUT, which is the only thing that gets synced to HPC.
 #
 #   - copies dpl-config.json into WORKFLOW_OUTPUT
@@ -280,7 +280,7 @@ _bake_run_bundle() {
 #   /root     → FAKEHOME
 #   /workdir  → GROUP_DIR  (filelist.txt + AnalysisResults.root land here)
 #   /analysis → WORKFLOW_OUTPUT (dpl-config.json, run_generated.sh, .hooks.sh —
-#               fully self-contained; analyses/<wf>/ itself is never needed
+#               fully self-contained; analysis/<wf>/ itself is never needed
 #               here, which is what makes syncing to HPC lightweight)
 #   /data     → DATA_BASE  (local AOD files)
 #   /output   → WORKFLOW_OUTPUT (same dir as /analysis; kept as a separate
@@ -379,9 +379,9 @@ _run_groups_local() {
 # Drives an HPC run entirely from the local machine:
 #   1. WORKFLOW_OUTPUT is already resolved + generated + baked (self-contained)
 #      by the time this is called — see cmd_run.
-#   2. rsync ONLY that directory to the cluster (never all of analyses/).
+#   2. rsync ONLY that directory to the cluster (never all of analysis/).
 #   3. ssh into the cluster and trigger OAR submission remotely, via a
-#      lightweight command that doesn't need analyses/config_*.sh at all.
+#      lightweight command that doesn't need analysis/config_*.sh at all.
 # ==============================================================================
 _run_hpc() {
     local WF_NAME="$1"
@@ -437,7 +437,7 @@ _run_hpc() {
 # cmd_submit_remote
 # Runs ON the HPC login node (invoked over SSH by _run_hpc, never by hand).
 # Submits OAR jobs for a workflow bundle that has already been synced —
-# never reads analyses/config_input.sh or config_tasks.sh.
+# never reads analysis/config_input.sh or config_tasks.sh.
 #
 # Usage: o2 submit-remote <workflow> <production> --mode <mode> [--resume]
 # ==============================================================================

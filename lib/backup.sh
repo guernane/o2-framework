@@ -12,9 +12,8 @@ _backup_help() {
     cat << 'EOF'
 o2 backup ["commit message"]
 
-Commits and pushes any local changes in all three repos to GitHub:
+Commits and pushes any local changes in the following repos to GitHub:
   - o2-framework  (~/alice)
-  - analyses      (~/alice/analyses)
   - O2Physics     (~/alice/sw/O2Physics)
 
 If no commit message is given, a timestamp is used.
@@ -59,7 +58,6 @@ cmd_backup() {
     echo "========================================"
 
     _backup_repo "$O2_LOCAL_DIR"              "o2-framework" "$MSG"
-    _backup_repo "$O2_LOCAL_DIR/analyses"     "analyses"     "$MSG"
 
     log_info "[O2Physics] skipped — use 'o2 build --commit \"msg\"' instead"
     log_info "[O2Physics] (aliBuild's MIRROR alternate-object-path setup"
