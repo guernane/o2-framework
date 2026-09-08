@@ -86,30 +86,6 @@ cmd_export() {
                 rm -rf "$TMP_DIR/o2-framework/.git"
                 BUNDLE_DIRS+=("o2-framework")
                 ;;
-            analysis)
-                log_info "Cloning guernane/analysis..."
-                gh repo clone guernane/analysis "$TMP_DIR/analysis" -- --depth 1 -q
-                rm -rf "$TMP_DIR/analysis/.git"
-
-                if [ "$ANALYSIS_PATHS" != "ALL" ]; then
-                    local KEEP_ARGS=()
-                    IFS=',' read -ra KEEP_DIRS <<< "$ANALYSIS_PATHS"
-                    for d in "${KEEP_DIRS[@]}"; do
-                        KEEP_ARGS+=(! -name "$d")
-                    done
-                    KEEP_ARGS+=(! -name "analysis.json" ! -name "README.md")
-                    find "$TMP_DIR/analysis" -mindepth 1 -maxdepth 1 "${KEEP_ARGS[@]}" -exec rm -rf {} +
-                    log_info "analysis/ trimmed to: $ANALYSIS_PATHS"
-                fi
-
-                if [ "$KEEP_ARTIFACTS" -eq 0 ]; then
-                    find "$TMP_DIR/analysis" -mindepth 2 -maxdepth 2 \
-                        \( -name "output" -o -name "bookkeeping" \) -exec rm -rf {} +
-                    log_info "analysis/: excluded output/ and bookkeeping/ (run artifacts)"
-                fi
-
-                BUNDLE_DIRS+=("analysis")
-                ;;
             O2Physics)
                 log_info "Cloning guernane/O2Physics (dev branch, shallow)..."
                 gh repo clone guernane/O2Physics "$TMP_DIR/O2Physics" -- --depth 1 --branch dev -q

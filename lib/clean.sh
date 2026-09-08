@@ -66,7 +66,7 @@ _clean_list_data_local() {
 }
 
 _clean_list_outputs_local() {
-    find "$O2_LOCAL_DIR/analyses" -mindepth 3 -maxdepth 3 -type d -path "*/output/*" 2>/dev/null \
+    find "$O2_LOCAL_DIR/analysis" -mindepth 3 -maxdepth 3 -type d -path "*/output/*" 2>/dev/null \
         | while read -r d; do
             local PROD WF NAME
             PROD="$(basename "$d")"

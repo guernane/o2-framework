@@ -316,8 +316,8 @@ _status_all() {
 
     if _is_local_machine && [ "$USE_LOCAL" -eq 0 ]; then
         # List from HPC via SSH
-        local ANALYSES
-        ANALYSES=$(ssh "${O2_HPC_USER}@${O2_HPC_HOST}" \
+        local ANALYSIS
+        ANALYSIS=$(ssh "${O2_HPC_USER}@${O2_HPC_HOST}" \
             "ls ${O2_HPC_HOME_DIR}/analysis/ 2>/dev/null" 2>/dev/null)
 
         while IFS= read -r wf; do
@@ -330,10 +330,10 @@ _status_all() {
                 [ -z "$prod" ] && continue
                 _status_overview "$wf" "$prod" "$USE_LOCAL"
             done <<< "$PRODS"
-        done <<< "$ANALYSES"
+        done <<< "$ANALYSIS"
     else
-        local ANALYSES_DIR="$O2_LOCAL_DIR/analyses"
-        for wf_path in "$ANALYSES_DIR"/*/; do
+        local ANALYSIS_DIR="$O2_LOCAL_DIR/analysis"
+        for wf_path in "$ANALYSIS_DIR"/*/; do
             local wf
             wf=$(basename "$wf_path")
             for bk in "$wf_path/bookkeeping/"*.json; do

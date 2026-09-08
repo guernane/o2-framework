@@ -546,7 +546,6 @@ _rebuild_tasks() {
 
     if [ ! -f "$REGISTRY" ]; then
         log_error "analysis.json not found at $REGISTRY"
-        log_error "Run: cd ~/alice/analysis && git pull"
         return 1
     fi
 
