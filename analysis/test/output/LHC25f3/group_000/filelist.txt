@@ -1,2 +1,0 @@
-alien:///alice/sim/2025/LHC25f3/0/544013/AOD/001/AO2D.root
-alien:///alice/sim/2025/LHC25f3/0/544013/AOD/002/AO2D.root
