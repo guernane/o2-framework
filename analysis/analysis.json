@@ -2,19 +2,21 @@
   "analysis": [
     {
       "name": "test",
-      "enabled": false,
+      "enabled": true,
+      "status": "dev",
       "description": "Pipeline validation test",
       "tasks": [
         {
           "file": "testTask.cxx",
           "dpl": "test-task",
-          "enabled": false
+          "enabled": true
         }
       ]
     },
     {
       "name": "proxies",
       "enabled": false,
+      "status": "dev",
       "description": "Track distributions for DELPHES proxies",
       "tasks": [
         {
@@ -24,5 +26,11 @@
         }
       ]
     }
-  ]
+  ],
+  "worktrees": {
+    "dev": {
+      "tag": "latest",
+      "commit": "572c4a9e90ae0396eead1c6f2093673e9b3c8e4e"
+    }
+  }
 }

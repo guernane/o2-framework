@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==============================================================================
 # lib/export.sh
-# Clones fresh copies of the 3 repos from GitHub (not local working copies)
+# Clones fresh copies of the 2 repos from GitHub (not local working copies)
 # and bundles them into a single archive, ready to share (e.g. with Claude).
 # Local machine only. Requires the GitHub CLI ('gh').
 #
@@ -16,22 +16,18 @@ o2 export [output_path] [options]
 Clones fresh copies of the selected repos directly from GitHub (guaranteeing
 the exported content matches what's actually backed up, not just your
 local working copy) and bundles them into a single .tar.gz archive.
+analysis/ lives inside the o2-framework repo, so it is exported along with
+it automatically — there is no separate filtering for it.
 
 Any file committed and pushed to GitHub is automatically picked up on the
 next export — nothing to update in this script when you add new files.
-The only filtering below applies to O2Physics (too large to include whole)
-and to per-workflow run artifacts in analysis/ (output/, bookkeeping/ —
-these are run results, not source, and are excluded by default).
+The only filtering below applies to O2Physics (too large to include whole).
 
 Options:
-  --repos "a,b,c"            Which repos to include. Default: all three.
-                             Choices: o2-framework, O2Physics
-  --o2physics-paths "..."    Top-level O2Physics dirs to keep.
-                             Default: "PWGJE,Common". Use "ALL" for everything.
-  --analysis-paths "..."     Top-level analysis/ dirs to keep (e.g. just one
-                             workflow). Default: "ALL" (analysis/ is small).
-  --keep-artifacts           Keep output/ and bookkeeping/ dirs in analysis/
-                             (excluded by default — these are run results).
+  --repos "a,b"               Which repos to include. Default: both.
+                               Choices: o2-framework, O2Physics
+  --o2physics-paths "..."     Top-level O2Physics dirs to keep.
+                               Default: "PWGJE,Common". Use "ALL" for everything.
 
 Default output: ~/alice_export_<timestamp>.tar.gz
 
@@ -39,8 +35,6 @@ Examples:
   o2 export
   o2 export --repos "o2-framework"
   o2 export --o2physics-paths "PWGJE,PWGCF,Common"
-  o2 export --analysis-paths "test"
-  o2 export --keep-artifacts
 EOF
 }
 
@@ -48,15 +42,12 @@ cmd_export() {
     local OUT=""
     local REPOS="o2-framework,O2Physics"
     local O2PHYSICS_PATHS="PWGJE,Common"
-    local ANALYSIS_PATHS="ALL"
-    local KEEP_ARTIFACTS=0
 
     while [ $# -gt 0 ]; do
         case "$1" in
             --repos)             REPOS="$2"; shift 2 ;;
             --o2physics-paths)   O2PHYSICS_PATHS="$2"; shift 2 ;;
-            --analysis-paths)    ANALYSIS_PATHS="$2"; shift 2 ;;
-            --keep-artifacts)    KEEP_ARTIFACTS=1; shift ;;
+            --*)                 log_error "Unknown option: $1"; _export_help; exit 1 ;;
             *)                   OUT="$1"; shift ;;
         esac
     done

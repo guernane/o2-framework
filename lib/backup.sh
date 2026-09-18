@@ -1,7 +1,8 @@
 #!/bin/bash
 # ==============================================================================
 # lib/backup.sh
-# Commits and pushes any local changes in the 3 repos to GitHub.
+# Commits and pushes any local changes in o2-framework to GitHub
+# (O2Physics is handled separately — see 'o2 build --commit').
 # Local machine only.
 #
 # Usage:

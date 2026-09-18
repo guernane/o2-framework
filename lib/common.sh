@@ -37,6 +37,7 @@ resolve_paths() {
         FAKEHOME="$BASE/fakehome"
         DATA_BASE="$BASE/data"
         O2PHYSICS_SRC="$BASE/sw/O2Physics"
+        O2PHYSICS_MASTER_SRC="$BASE/sw/O2Physics-master"
         RESCUE_DIR="$BASE/rescue"
     else
         SUDO=""
@@ -58,6 +59,7 @@ resolve_paths() {
         FAKEHOME="$SCRATCH/fakehome"
         DATA_BASE="$SCRATCH/data"
         O2PHYSICS_SRC="$SCRATCH/sw/O2Physics"
+        O2PHYSICS_MASTER_SRC="$SCRATCH/sw/O2Physics-master"
         RESCUE_DIR="$SCRATCH/rescue"
     fi
 
@@ -246,6 +248,52 @@ _o2_container_raw() {
             eval "$(alienv shell-helper)"
             "$@"
         ' -- "${CMD[@]}"
+}
+
+# ==============================================================================
+# _resolve_worktree
+# Resolve a friendly name to the corresponding O2Physics worktree path on
+# disk. This is the single place every command that needs to act on a
+# specific worktree (build/run/tools) goes through, so 'dev', 'master'
+# and a PR name always mean the same directory everywhere in the codebase.
+#
+# Naming convention:
+#   ""|dev   -> $O2PHYSICS_SRC          (the main clone — always exists
+#                                         once 'o2 build' has run once)
+#   master   -> $O2PHYSICS_MASTER_SRC   (read-only mirror of upstream/master)
+#   <name>   -> $SW_DIR/O2Physics-pr-<name>
+#
+# For anything other than dev, the path is also checked against the real
+# 'git worktree list' of the dev clone — this catches a name that was
+# never created, or one whose worktree was already removed (e.g. after
+# --pr-cleanup), instead of silently resolving to a stale/missing path.
+#
+# Args: $1 = name (optional, defaults to "dev")
+# Echoes the resolved path on success. Returns 1 and echoes nothing on
+# failure — callers are expected to log_error with their own context
+# (this function doesn't know whether "not found" is fatal for the caller).
+# ==============================================================================
+_resolve_worktree() {
+    local NAME="${1:-dev}"
+    local WT_PATH=""
+
+    case "$NAME" in
+        ""|dev) WT_PATH="$O2PHYSICS_SRC" ;;
+        master) WT_PATH="$O2PHYSICS_MASTER_SRC" ;;
+        *)      WT_PATH="$SW_DIR/O2Physics-pr-$NAME" ;;
+    esac
+
+    # A linked worktree's ".git" is a FILE (pointer to the main repo's
+    # worktrees metadata), not a directory — only the main clone (dev) has
+    # a real .git directory. -e covers both.
+    [ -e "$WT_PATH/.git" ] || return 1
+
+    if [ "$NAME" != "" ] && [ "$NAME" != "dev" ]; then
+        git -C "$O2PHYSICS_SRC" worktree list 2>/dev/null \
+            | awk '{print $1}' | grep -qxF "$WT_PATH" || return 1
+    fi
+
+    echo "$WT_PATH"
 }
 
 # ==============================================================================

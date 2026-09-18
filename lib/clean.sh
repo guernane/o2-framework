@@ -263,7 +263,7 @@ cmd_clean() {
     case "$CATEGORY" in
         data|outputs|builds) ;;
         *)
-            log_error "First argument must be: list, data, outputs, or builds"
+            log_error "First argument must be: data, outputs, or builds (use 'o2 list' to browse first)"
             _clean_help
             exit 1
             ;;

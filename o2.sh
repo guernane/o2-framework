@@ -211,7 +211,7 @@ case "$COMMAND" in
         cmd_clean "$@"
         ;;
     list)
-        source "$SCRIPTS_DIR/lib/clean.sh"
+        source "$SCRIPTS_DIR/lib/list.sh"
         cmd_list "$@"
         ;;
     help|-h|--help)
