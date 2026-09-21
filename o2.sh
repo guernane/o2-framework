@@ -46,6 +46,15 @@
 set -e
 
 # ==============================================================================
+# Debug mode: O2_DEBUG=1 o2 <command> ... prints every command as it runs
+# (bash -x), including inside container invocations. Off by default —
+# very verbose, meant for diagnosing exactly where something fails.
+# ==============================================================================
+if [ -n "$O2_DEBUG" ]; then
+    set -x
+fi
+
+# ==============================================================================
 # Bootstrap: locate scripts directory and config file
 # ==============================================================================
 SCRIPTS_DIR="$(dirname "$(realpath "$0")")"

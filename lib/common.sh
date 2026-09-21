@@ -37,7 +37,7 @@ resolve_paths() {
         FAKEHOME="$BASE/fakehome"
         DATA_BASE="$BASE/data"
         O2PHYSICS_SRC="$BASE/sw/O2Physics"
-        O2PHYSICS_MASTER_SRC="$BASE/sw/O2Physics-master"
+        O2PHYSICS_MASTER_SRC="$BASE/sw/O2Physics/.worktrees/master"
         RESCUE_DIR="$BASE/rescue"
     else
         SUDO=""
@@ -59,7 +59,7 @@ resolve_paths() {
         FAKEHOME="$SCRATCH/fakehome"
         DATA_BASE="$SCRATCH/data"
         O2PHYSICS_SRC="$SCRATCH/sw/O2Physics"
-        O2PHYSICS_MASTER_SRC="$SCRATCH/sw/O2Physics-master"
+        O2PHYSICS_MASTER_SRC="$SCRATCH/sw/O2Physics/.worktrees/master"
         RESCUE_DIR="$SCRATCH/rescue"
     fi
 
@@ -190,6 +190,7 @@ _o2_container() {
     }
 
     $SUDO apptainer exec --cleanenv \
+        --env O2_DEBUG="$O2_DEBUG" \
         -B "$SW_DIR:/alice/sw" \
         -B "$TMP_DIR:/tmp" \
         -B "$FAKEHOME:/root" \
@@ -201,6 +202,7 @@ _o2_container() {
             export TMPDIR=/tmp
             export LANG=en_US.UTF-8
             export LC_ALL=en_US.UTF-8
+            [ -n "$O2_DEBUG" ] && set -x
             eval "$(alienv shell-helper)"
             alienv setenv O2Physics/latest -c "$@"
         ' -- "${CMD[@]}"
@@ -234,6 +236,7 @@ _o2_container_raw() {
     }
 
     $SUDO apptainer exec --cleanenv \
+        --env O2_DEBUG="$O2_DEBUG" \
         -B "$SW_DIR:/alice/sw" \
         -B "$TMP_DIR:/tmp" \
         -B "$FAKEHOME:/root" \
@@ -245,6 +248,7 @@ _o2_container_raw() {
             export TMPDIR=/tmp
             export LANG=en_US.UTF-8
             export LC_ALL=en_US.UTF-8
+            [ -n "$O2_DEBUG" ] && set -x
             eval "$(alienv shell-helper)"
             "$@"
         ' -- "${CMD[@]}"
@@ -261,7 +265,7 @@ _o2_container_raw() {
 #   ""|dev   -> $O2PHYSICS_SRC          (the main clone — always exists
 #                                         once 'o2 build' has run once)
 #   master   -> $O2PHYSICS_MASTER_SRC   (read-only mirror of upstream/master)
-#   <name>   -> $SW_DIR/O2Physics-pr-<name>
+#   <name>   -> $O2PHYSICS_SRC/.worktrees/pr-<name>
 #
 # For anything other than dev, the path is also checked against the real
 # 'git worktree list' of the dev clone — this catches a name that was
@@ -280,7 +284,7 @@ _resolve_worktree() {
     case "$NAME" in
         ""|dev) WT_PATH="$O2PHYSICS_SRC" ;;
         master) WT_PATH="$O2PHYSICS_MASTER_SRC" ;;
-        *)      WT_PATH="$SW_DIR/O2Physics-pr-$NAME" ;;
+        *)      WT_PATH="$O2PHYSICS_SRC/.worktrees/pr-$NAME" ;;
     esac
 
     # A linked worktree's ".git" is a FILE (pointer to the main repo's
@@ -294,6 +298,25 @@ _resolve_worktree() {
     fi
 
     echo "$WT_PATH"
+}
+
+# ==============================================================================
+# _ensure_git_excludes
+# Make sure dev's own .git/info/exclude ignores the nested directories
+# we create inside $O2PHYSICS_SRC for other worktrees and build staging
+# (.worktrees/, .multibuild/) — otherwise 'git add -A'/'git status' in
+# dev would see another worktree's files as plain untracked content.
+# Local-only (not committed), safe to call repeatedly.
+# ==============================================================================
+_ensure_git_excludes() {
+    local EXCLUDE_FILE="$O2PHYSICS_SRC/.git/info/exclude"
+    [ -d "$O2PHYSICS_SRC/.git" ] || return 0
+    mkdir -p "$(dirname "$EXCLUDE_FILE")"
+    touch "$EXCLUDE_FILE"
+    local LINE
+    for LINE in ".worktrees/" ".multibuild/"; do
+        grep -qxF "$LINE" "$EXCLUDE_FILE" 2>/dev/null || echo "$LINE" >> "$EXCLUDE_FILE"
+    done
 }
 
 # ==============================================================================

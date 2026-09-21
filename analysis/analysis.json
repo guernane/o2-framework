@@ -29,8 +29,12 @@
   ],
   "worktrees": {
     "dev": {
-      "tag": "latest",
-      "commit": "572c4a9e90ae0396eead1c6f2093673e9b3c8e4e"
+      "tag": "dev-local8",
+      "commit": "ae259aa283d7313bf4036b579207f8a3df2bf8c7"
+    },
+    "master": {
+      "tag": "b87f2e67bb-local1",
+      "commit": "b87f2e67bba34fc8c1f6b17b086b7042542132bc"
     }
   }
 }

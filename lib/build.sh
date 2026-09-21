@@ -142,7 +142,10 @@ cmd_build() {
 
 # ==============================================================================
 # _build_lock_acquire / _build_lock_release
-# Lockfile written to $SW_DIR/.build.lock while a build is in progress.
+# Lockfile written to $O2_LOCAL_DIR/.build.lock (NOT under $SW_DIR — on
+# some sites $SW_DIR's top level is admin-owned and only specific
+# pre-provisioned subdirs are writable by the user; $O2_LOCAL_DIR itself
+# always is) while a build is in progress.
 # Prevents o2 deploy from wiping SOURCES/O2Physics mid-build.
 #
 # Lock format (one line per field):
@@ -156,7 +159,7 @@ cmd_build() {
 # _deploy_sync_sources reads this file via SSH before touching SOURCES/.
 # ==============================================================================
 _build_lock_acquire() {
-    local LOCK="$SW_DIR/.build.lock"
+    local LOCK="$O2_LOCAL_DIR/.build.lock"
     if [ -f "$LOCK" ]; then
         log_warn "Build lock exists: $LOCK"
         log_warn "Contents:"
@@ -164,7 +167,7 @@ _build_lock_acquire() {
         log_error "Another build may be running. Remove $LOCK manually if it is stale."
         exit 1
     fi
-    mkdir -p "$SW_DIR"
+    mkdir -p "$O2_LOCAL_DIR"
     cat > "$LOCK" << LOCKEOF
 pid=$$
 oar_job=${OAR_JOB_ID:-local}
@@ -175,7 +178,7 @@ LOCKEOF
 }
 
 _build_lock_release() {
-    local LOCK="$SW_DIR/.build.lock"
+    local LOCK="$O2_LOCAL_DIR/.build.lock"
     if [ -f "$LOCK" ]; then
         rm -f "$LOCK"
         log_info "Build lock released"
@@ -741,7 +744,7 @@ _build_cut_pr() {
         return 1
     fi
 
-    local WT_PATH="$SW_DIR/O2Physics-pr-$ANALYSIS"
+    local WT_PATH="$O2PHYSICS_SRC/.worktrees/pr-$ANALYSIS"
     if [ -e "$WT_PATH" ]; then
         log_error "Worktree already exists: $WT_PATH"
         log_error "Run 'o2 build --pr-cleanup $ANALYSIS' first if you want to re-cut it"
@@ -750,6 +753,8 @@ _build_cut_pr() {
 
     log_step "Cutting PR branch '$BRANCH_NAME' for $ANALYSIS"
 
+    _ensure_git_excludes
+    mkdir -p "$(dirname "$WT_PATH")"
     cd "$O2PHYSICS_SRC" || return 1
     git fetch upstream --quiet
     if ! git branch "$BRANCH_NAME" upstream/master 2>/dev/null; then
@@ -900,6 +905,8 @@ _ensure_master_worktree() {
     }
 
     log_step "Creating master worktree at $O2PHYSICS_MASTER_SRC"
+    _ensure_git_excludes
+    mkdir -p "$(dirname "$O2PHYSICS_MASTER_SRC")"
     cd "$O2PHYSICS_SRC" || return 1
     git fetch upstream --quiet
     git worktree add "$O2PHYSICS_MASTER_SRC" upstream/master
@@ -917,18 +924,35 @@ _build_record_tag() {
     local NAME="$1"
     local WT="$2"
 
-    # Ask alienv itself for the exact, usable tag — do NOT infer it from
-    # directory listings: real-world output showed a dev-package build
-    # tagged "latest-dev-o2" (defaults-profile-dependent), not a plain
-    # "latest" or a directory-derived name. 'alienv q' is the same lookup
-    # alienv uses internally to validate a module name, so its output is
-    # authoritative. We take the "latest*" line since that is what a
-    # dev-package build produces (see WARNING below).
+    # Real-world testing went through two wrong approaches before this
+    # one:
+    #   1. 'alienv q' substring-grep on "latest" — matches several
+    #      entries at once (a moving "latest" pointer plus per-worktree
+    #      tags), grabbed the wrong one.
+    #   2. "most recently modified real directory" — wrong whenever THIS
+    #      build was a no-op ("does not need rebuild", nothing touched),
+    #      because it then just picks whichever OTHER worktree happened
+    #      to be built most recently.
+    #
+    # What actually works: real per-worktree install directories are
+    # named "<gitref>-local<N>", where <gitref> is the branch name (for
+    # dev, always "dev") or a 10-hex-char abbreviated commit hash (for a
+    # detached-HEAD worktree — confirmed from two independent real
+    # builds: "9741fc8cc2-local1", "b87f2e67bb-local1"). Derive <gitref>
+    # from the worktree's own git state and match on that name prefix —
+    # unambiguous regardless of what else was built more recently.
+    local GITREF
+    GITREF=$(git -C "$WT" rev-parse --abbrev-ref HEAD)
+    if [ "$GITREF" = "HEAD" ]; then
+        GITREF=$(git -C "$WT" rev-parse HEAD | cut -c1-10)
+    fi
+
     local TAG
-    TAG=$(_o2_container_raw -- bash -c '
-        eval "$(alienv shell-helper)" 2>/dev/null
-        alienv q O2Physics 2>/dev/null
-    ' 2>/dev/null | grep -oE '::[^ ]*latest[^ ]*' | sed 's/^:://' | head -1)
+    TAG=$(_o2_container_raw -- bash -c "
+        ARCH=\$(aliBuild architecture 2>/dev/null)
+        find \"/alice/sw/\$ARCH/O2Physics\" -mindepth 1 -maxdepth 1 -type d -name '${GITREF}-local*' -printf '%T@ %f\n' 2>/dev/null |
+            sort -rn | head -1 | cut -d' ' -f2-
+    " 2>/dev/null | tr -d '\r\n')
 
     if [ -z "$TAG" ]; then
         log_warn "Couldn't determine the build's version tag for [$NAME] — 'o2 build --use $NAME' won't work until this is fixed"
@@ -1001,7 +1025,8 @@ _build_worktree() {
     detect_resources
     _setup_git_safe
 
-    local STAGE_REL=".multibuild/$NAME"
+    local STAGE_REL="O2Physics/.multibuild/$NAME"
+    _ensure_git_excludes
     mkdir -p "$SW_DIR/$STAGE_REL"
     ln -sfn "$WT" "$SW_DIR/$STAGE_REL/O2Physics"
 
@@ -1018,7 +1043,7 @@ export ALIBUILD_WORK_DIR=/alice/sw
 export ALIBUILD_ANALYTICS=0
 eval "$(alienv shell-helper)"
 cd "/alice/sw/$STAGE_REL"
-aliBuild build O2Physics --work-dir /alice/sw --defaults "$ALIBUILD_DEFAULTS" --jobs "$BUILD_JOBS"
+aliBuild build O2Physics --work-dir /alice/sw --config-dir /alice/sw/alidist --defaults "$ALIBUILD_DEFAULTS" --jobs "$BUILD_JOBS"
 CONTAINER_EOF
 
     local BUILD_RC=${PIPESTATUS[0]}
@@ -1173,6 +1198,13 @@ _cmakelists_ensure_task_block() {
     local PWG="$4"
     local CORE_LIB="${PWG}Core"
 
+    # Always returns 0 on success — the script runs under 'set -e', so a
+    # non-zero "successful but informational" return (e.g. a bare
+    # 'return 2' to mean "added") would silently kill the whole script
+    # the instant this function returns. Use the _CMAKE_ACTION global
+    # instead to tell the caller what happened.
+    _CMAKE_ACTION="present"
+
     if [ ! -f "$CMAKEFILE" ]; then
         log_error "CMakeLists.txt not found at $CMAKEFILE"
         return 1
@@ -1189,7 +1221,8 @@ o2physics_add_dpl_workflow(${DPL_NAME}
                     PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2Physics::${CORE_LIB}
                     COMPONENT_NAME Analysis)
 CMAKEOF
-    return 2   # signals "actually added" vs "already present" (0)
+    _CMAKE_ACTION="added"
+    return 0
 }
 
 # ==============================================================================
@@ -1281,11 +1314,10 @@ _rebuild_tasks() {
         CMAKEFILE="$(dirname "$DST")/CMakeLists.txt"
 
         _cmakelists_ensure_task_block "$CMAKEFILE" "$TASK_FILE" "$DPL_NAME" "$PWG"
-        local CMAKE_RC=$?
         git -C "$O2PHYSICS_SRC" add "$CMAKEFILE" 2>/dev/null || true
-        if [ "$CMAKE_RC" -eq 2 ]; then
+        if [ "$_CMAKE_ACTION" = "added" ]; then
             log_info "[$ANALYSIS] Added $DPL_NAME to $(basename "$(dirname "$CMAKEFILE")")/CMakeLists.txt"
-        elif [ "$CMAKE_RC" -eq 0 ]; then
+        else
             log_info "[$ANALYSIS] $DPL_NAME already in $(basename "$(dirname "$CMAKEFILE")")/CMakeLists.txt"
         fi
 
@@ -1322,7 +1354,7 @@ CONTAINER_EOF
     local BUILD_RC=${PIPESTATUS[0]}
     if [ "$BUILD_RC" -eq 0 ]; then
         log_info "Incremental rebuild complete"
-        _build_record_tag "dev" "$O2PHYSICS_SRC"
+        _build_record_tag "dev" "$O2PHYSICS_SRC" || true
     else
         log_error "Incremental rebuild failed (exit $BUILD_RC) — check $BUILD_LOG"
         return 1

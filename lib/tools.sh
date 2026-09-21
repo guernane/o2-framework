@@ -62,7 +62,7 @@ cmd_tools_lint() {
         return 0
     fi
 
-    local CONTAINER_WT="/alice/sw/$(basename "$WT")"
+    local CONTAINER_WT="/alice/sw/${WT#$SW_DIR/}"
     log_step "O2 linter [${TARGET:-dev}] — ${#FILE_LIST[@]} file(s)"
     printf '    %s\n' "${FILE_LIST[@]}"
 
@@ -108,7 +108,7 @@ cmd_tools_format() {
         return 0
     fi
 
-    local CONTAINER_WT="/alice/sw/$(basename "$WT")"
+    local CONTAINER_WT="/alice/sw/${WT#$SW_DIR/}"
     local MODE_LABEL="in-place"
     [ "$CHECK_ONLY" -eq 1 ] && MODE_LABEL="check-only"
     log_step "clang-format ($MODE_LABEL) [${TARGET:-dev}] — ${#FILE_LIST[@]} file(s)"
@@ -358,7 +358,7 @@ cmd_tools_deps() {
             exit 1
         fi
         "$SCRIPT" "$@"
-    ' bash "/alice/sw/$(basename "$WT")" "${REST[@]}"
+    ' bash "/alice/sw/${WT#$SW_DIR/}" "${REST[@]}"
 }
 
 cmd_tools_clang_tidy() {
@@ -445,7 +445,7 @@ cmd_tools_cppcheck() {
 
     local WT
     WT=$(_tools_target "$TARGET") || return 1
-    local CONTAINER_WT="/alice/sw/$(basename "$WT")"
+    local CONTAINER_WT="/alice/sw/${WT#$SW_DIR/}"
 
     load_apptainer
     local LOGFILE="$LOG_DIR/cppcheck.err.log"
