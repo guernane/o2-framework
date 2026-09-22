@@ -32,6 +32,7 @@ cmd_run() {
     local RESUME=0
     local GROUP_OVERRIDE=""   # internal: set by OAR job script
     local HPC_MODE=0          # --hpc: drive everything from the local machine
+    local USE_NAME=""         # --use: run against a specific built worktree
 
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -40,6 +41,7 @@ cmd_run() {
             --group)   shift; GROUP_OVERRIDE="$1" ;;
             --resume)  RESUME=1 ;;
             --hpc)     HPC_MODE=1 ;;
+            --use)     shift; USE_NAME="$1" ;;
             --help|-h) _run_help; return 0 ;;
             -*)        log_warn "Unknown option: $1" ;;
             *)
@@ -52,6 +54,29 @@ cmd_run() {
     done
 
     [ -z "$WORKFLOW"   ] && { log_error "workflow name required"; _run_help; exit 1; }
+
+    # Resolve which built environment to run against (default: dev's
+    # "latest"). O2_ENV_TAG is read by _o2_container (see common.sh) —
+    # exporting it here makes every container invocation for the rest of
+    # this run use the right one, with no further plumbing needed.
+    if [ -n "$USE_NAME" ] && [ "$USE_NAME" != "dev" ]; then
+        local REGISTRY="$O2_LOCAL_DIR/analysis/analysis.json"
+        local RESOLVED_TAG=""
+        if [ -f "$REGISTRY" ]; then
+            RESOLVED_TAG=$(python3 -c "
+import json
+with open('$REGISTRY') as f:
+    data = json.load(f)
+print(data.get('worktrees', {}).get('$USE_NAME', {}).get('tag', ''))
+" 2>/dev/null)
+        fi
+        if [ -z "$RESOLVED_TAG" ]; then
+            log_error "No build recorded for [$USE_NAME] — run 'o2 build --list' to see available worktrees"
+            exit 1
+        fi
+        export O2_ENV_TAG="$RESOLVED_TAG"
+        log_info "Running against [$USE_NAME]: O2Physics/$RESOLVED_TAG"
+    fi
 
     _resolve_workflow_paths "$WORKFLOW" "$PRODUCTION"
 
@@ -105,10 +130,27 @@ cmd_run() {
     if [ "$ENV_TYPE" = "hpc_login" ]; then
         _submit_oar_jobs "$WORKFLOW" "$PRODUCTION" "$RESUME"
     else
-        _run_groups_local "$WORKFLOW" "$PRODUCTION" "$RESUME"
+        local RUN_RC=0
+        _run_groups_local "$WORKFLOW" "$PRODUCTION" "$RESUME" || RUN_RC=$?
         # Auto-merge after local run
         log_info "Launching merge..."
         cmd_merge "$WORKFLOW" "$PRODUCTION"
+
+        # Bump dev -> tested-local on a fully successful synchronous local
+        # run. Never downgrades an already-more-advanced status (see
+        # _analysis_set_status) — a re-run after a promotion doesn't undo
+        # it. Deliberately NOT done for --hpc/hpc_login: those submit a
+        # job and return immediately, so success isn't known yet here —
+        # confirm a cluster run manually with
+        # 'o2 analysis --set-status <name> tested-cluster' once you've
+        # checked the results.
+        if [ "$RUN_RC" -eq 0 ]; then
+            local REGISTRY="$O2_LOCAL_DIR/analysis/analysis.json"
+            if [ -f "$REGISTRY" ]; then
+                source "$SCRIPTS_DIR/lib/analysis.sh"
+                _analysis_set_status "$REGISTRY" "$WORKFLOW" "tested-local" 2>/dev/null || true
+            fi
+        fi
     fi
 }
 
@@ -124,12 +166,22 @@ Options:
   --runs LIST  comma-separated run numbers, or "all" (default: all)
   --mode MODE  data mode: "local" or "alien" (overrides o2_config.sh)
   --resume     skip completed groups, rerun only failed ones
+  --hpc        drive everything from here, jobs run on the cluster
+  --use <name> run against a specific built worktree instead of dev's
+               default (dev/master/a PR name — see 'o2 build --list')
+
+A fully successful plain local run (no --hpc) automatically bumps the
+workflow's analysis.json status from dev to tested-local. Cluster runs
+are async (the job is submitted, not finished, by the time this
+returns), so tested-cluster stays a manual step once you've checked the
+results: o2 analysis --set-status <name> tested-cluster
 
 Examples:
   o2 run proxies LHC24aj
   o2 run proxies LHC24aj --runs 544116,544122
   o2 run proxies LHC24aj --mode alien
   o2 run proxies LHC24aj --resume
+  o2 run proxies LHC24aj --use master
 EOF
 }
 
@@ -370,8 +422,11 @@ _run_groups_local() {
 
     echo ""
     log_info "Local run complete: $((N_GROUPS - FAILED))/$N_GROUPS succeeded"
-    [ "$FAILED" -gt 0 ] && \
+    if [ "$FAILED" -gt 0 ]; then
         log_warn "$FAILED group(s) failed — retry with: o2 run $WF_NAME $PROD --resume"
+        return 1
+    fi
+    return 0
 }
 
 # ==============================================================================

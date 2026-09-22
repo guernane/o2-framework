@@ -119,7 +119,7 @@ _sync_check() {
     fi
 
     # --- Build lock state ---
-    local LOCK_FILE="${O2_HPC_SCRATCH_DIR}/sw/.build.lock"
+    local LOCK_FILE="${O2_HPC_HOME_DIR}/.build.lock"
     local LOCK_CONTENT
     LOCK_CONTENT=$(ssh "$HPC_LOGIN" "cat $LOCK_FILE 2>/dev/null || true")
     if [ -n "$LOCK_CONTENT" ]; then

@@ -89,6 +89,10 @@ cmd_build() {
     if [ "$DO_LIST" -eq 1 ]; then _build_list; return; fi
     if [ "$DO_BUILD_WT" -eq 1 ]; then
         _build_assert_local "build-worktree"
+        # PR worktrees are on a fixed branch the user owns — only master
+        # gets auto-refreshed here, right before it's the thing we're
+        # about to build.
+        [ "$BUILD_WT_NAME" = "master" ] && _refresh_master_source
         _build_worktree "$BUILD_WT_NAME"
         return
     fi
@@ -102,9 +106,10 @@ cmd_build() {
         _git_update
         return
     fi
-    if [ "$REBUILD_TASKS"   -eq 1 ]; then _rebuild_tasks; return; fi
+    if [ "$REBUILD_TASKS"   -eq 1 ]; then _refresh_master_source; _rebuild_tasks; return; fi
 
     # Full build or partial
+    _refresh_master_source
     load_apptainer
     detect_resources
 
@@ -142,11 +147,14 @@ cmd_build() {
 
 # ==============================================================================
 # _build_lock_acquire / _build_lock_release
-# Lockfile written to $O2_LOCAL_DIR/.build.lock (NOT under $SW_DIR — on
-# some sites $SW_DIR's top level is admin-owned and only specific
-# pre-provisioned subdirs are writable by the user; $O2_LOCAL_DIR itself
-# always is) while a build is in progress.
-# Prevents o2 deploy from wiping SOURCES/O2Physics mid-build.
+# Lockfile written to $BUILD_LOCK_FILE (set by resolve_paths — never
+# under $SW_DIR/$SCRATCH/sw: on some sites their top level is
+# admin-owned and only specific pre-provisioned subdirs are writable by
+# the user. $BUILD_LOCK_FILE resolves to $O2_LOCAL_DIR/.build.lock when
+# running locally and $O2_HPC_HOME_DIR/.build.lock when running on the
+# cluster — both are small-quota, always-user-owned locations, matching
+# where LOG_DIR already lives in each context) while a build is in
+# progress. Prevents o2 deploy from wiping SOURCES/O2Physics mid-build.
 #
 # Lock format (one line per field):
 #   pid=<PID>
@@ -156,10 +164,12 @@ cmd_build() {
 #
 # The lock is also released automatically via trap EXIT so a killed job
 # (OAR walltime, Ctrl-C) does not leave a stale lock forever.
-# _deploy_sync_sources reads this file via SSH before touching SOURCES/.
+# _deploy_sync_sources/_sync_check_lock read this file via SSH before
+# touching SOURCES/ — see lib/deploy.sh and lib/sync.sh, which must stay
+# in sync with this path.
 # ==============================================================================
 _build_lock_acquire() {
-    local LOCK="$O2_LOCAL_DIR/.build.lock"
+    local LOCK="$BUILD_LOCK_FILE"
     if [ -f "$LOCK" ]; then
         log_warn "Build lock exists: $LOCK"
         log_warn "Contents:"
@@ -167,7 +177,7 @@ _build_lock_acquire() {
         log_error "Another build may be running. Remove $LOCK manually if it is stale."
         exit 1
     fi
-    mkdir -p "$O2_LOCAL_DIR"
+    mkdir -p "$(dirname "$LOCK")"
     cat > "$LOCK" << LOCKEOF
 pid=$$
 oar_job=${OAR_JOB_ID:-local}
@@ -178,7 +188,7 @@ LOCKEOF
 }
 
 _build_lock_release() {
-    local LOCK="$O2_LOCAL_DIR/.build.lock"
+    local LOCK="$BUILD_LOCK_FILE"
     if [ -f "$LOCK" ]; then
         rm -f "$LOCK"
         log_info "Build lock released"
@@ -914,6 +924,47 @@ _ensure_master_worktree() {
 }
 
 # ==============================================================================
+# _refresh_master_source
+# Cheap, silent, best-effort: fetch upstream and fast-forward the master
+# worktree's SOURCE to upstream/master's current tip, on every 'o2
+# build' call that actually does something (not on read-only queries
+# like --list/--status/--use). Only touches git state — never triggers
+# a rebuild by itself; that stays an explicit
+# 'o2 build --build-worktree master' (which also calls this first).
+#
+# Skips silently if the master worktree hasn't been created yet (first
+# use of --build-worktree master creates it) — this function never
+# creates it itself, so a plain 'o2 build' on a fresh checkout isn't
+# slowed down by also setting up a worktree nobody asked for yet.
+#
+# reset --hard is safe here specifically because the master worktree is
+# never edited by hand (see _ensure_master_worktree) — there is nothing
+# local to lose.
+# ==============================================================================
+_refresh_master_source() {
+    # A linked worktree's .git is a FILE (pointer to the main repo's
+    # worktrees metadata), not a directory — same pitfall as
+    # _resolve_worktree earlier; -e covers both cases.
+    [ -e "$O2PHYSICS_MASTER_SRC/.git" ] || return 0
+
+    local BEFORE
+    BEFORE=$(git -C "$O2PHYSICS_SRC" rev-parse upstream/master 2>/dev/null)
+
+    git -C "$O2PHYSICS_SRC" fetch upstream --quiet 2>/dev/null || {
+        log_warn "Couldn't refresh master (no network / upstream unreachable) — using last known state"
+        return 0
+    }
+
+    local AFTER
+    AFTER=$(git -C "$O2PHYSICS_SRC" rev-parse upstream/master 2>/dev/null)
+
+    if [ -n "$AFTER" ] && [ "$BEFORE" != "$AFTER" ]; then
+        git -C "$O2PHYSICS_MASTER_SRC" reset --hard upstream/master --quiet 2>/dev/null
+        log_info "master refreshed: $(echo "$AFTER" | cut -c1-10) (was $(echo "${BEFORE:-none}" | cut -c1-10))"
+    fi
+}
+
+# ==============================================================================
 # _build_record_tag
 # Discover the alienv version tag a just-finished build produced (never
 # "latest") and record it + the worktree's current commit in
@@ -1136,6 +1187,7 @@ for a in data.get('analysis', []):
         WT=$(_resolve_worktree "$NAME" 2>/dev/null) || continue
         local BRANCH
         BRANCH=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null)
+        [ "$BRANCH" = "HEAD" ] && BRANCH="(detached)"
         local CURRENT_COMMIT
         CURRENT_COMMIT=$(git -C "$WT" rev-parse HEAD 2>/dev/null)
 

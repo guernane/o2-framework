@@ -245,7 +245,7 @@ SYNCEOF"
     # Safety check: read the build lockfile on the cluster before touching SOURCES/.
     # The lock is written by _build_lock_acquire() at the start of every build
     # and removed by _build_lock_release() on EXIT — including OAR walltime kills.
-    local LOCK_FILE="${HPC_SW}/.build.lock"
+    local LOCK_FILE="${O2_HPC_HOME_DIR}/.build.lock"
     local LOCK_CONTENT
     LOCK_CONTENT=$(ssh "$HPC_LOGIN" "cat $LOCK_FILE 2>/dev/null || true")
     if [ -n "$LOCK_CONTENT" ]; then

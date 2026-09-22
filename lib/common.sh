@@ -39,6 +39,7 @@ resolve_paths() {
         O2PHYSICS_SRC="$BASE/sw/O2Physics"
         O2PHYSICS_MASTER_SRC="$BASE/sw/O2Physics/.worktrees/master"
         RESCUE_DIR="$BASE/rescue"
+        BUILD_LOCK_FILE="$BASE/.build.lock"
     else
         SUDO=""
         if [ -n "${O2_HPC_SCRATCH_DIR:-}" ]; then
@@ -61,6 +62,10 @@ resolve_paths() {
         O2PHYSICS_SRC="$SCRATCH/sw/O2Physics"
         O2PHYSICS_MASTER_SRC="$SCRATCH/sw/O2Physics/.worktrees/master"
         RESCUE_DIR="$SCRATCH/rescue"
+        # Same reasoning as LOG_DIR above: O2_HPC_HOME_DIR (small quota,
+        # backed up, always user-owned), not $SCRATCH/sw — matches the
+        # local branch's choice of $O2_LOCAL_DIR over $SW_DIR.
+        BUILD_LOCK_FILE="$O2_HPC_HOME_DIR/.build.lock"
     fi
 
     mkdir -p "$LOG_DIR" "$FAKEHOME" "$SW_DIR" "$TMP_BASE" \
@@ -191,6 +196,7 @@ _o2_container() {
 
     $SUDO apptainer exec --cleanenv \
         --env O2_DEBUG="$O2_DEBUG" \
+        --env O2_ENV_TAG="${O2_ENV_TAG:-latest}" \
         -B "$SW_DIR:/alice/sw" \
         -B "$TMP_DIR:/tmp" \
         -B "$FAKEHOME:/root" \
@@ -204,7 +210,7 @@ _o2_container() {
             export LC_ALL=en_US.UTF-8
             [ -n "$O2_DEBUG" ] && set -x
             eval "$(alienv shell-helper)"
-            alienv setenv O2Physics/latest -c "$@"
+            alienv setenv "O2Physics/${O2_ENV_TAG:-latest}" -c "$@"
         ' -- "${CMD[@]}"
 }
 
