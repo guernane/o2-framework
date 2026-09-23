@@ -55,18 +55,23 @@ cmd_analysis() {
 
 # ==============================================================================
 # _analysis_migrate_schema
-# Ensure every analysis entry has a "status" field (default "dev" for
-# anything written before this field existed). Runs on every 'o2 analysis'
-# call — safe to call repeatedly, only writes the file if something was
-# actually missing, so there is no separate migration step to remember.
+# Two migrations, both idempotent and safe to run on every 'o2 analysis'
+# call — only writes the file if something was actually missing/legacy,
+# so there is no separate migration step to remember:
+#   1. add "status" (default "dev") to any entry that predates it.
+#   2. fold the legacy "tasks[]" array (bare filename, single implicit
+#      PWG from O2_PHYSICS_COMPONENTS) into "files[]" (full path) — the
+#      two arrays covered the same concept with two different shapes
+#      since Phase 5a; every reader now only looks at "files[]".
+#      "tasks" is removed once folded.
 # ==============================================================================
 _analysis_migrate_schema() {
     local REGISTRY="$1"
 
-    python3 - "$REGISTRY" << 'PYEOF'
+    python3 - "$REGISTRY" "$O2_PHYSICS_COMPONENTS" << 'PYEOF'
 import sys, json
 
-registry_path = sys.argv[1]
+registry_path, default_components = sys.argv[1:]
 with open(registry_path) as f:
     data = json.load(f)
 
@@ -74,6 +79,24 @@ changed = False
 for analysis in data.get("analysis", []):
     if "status" not in analysis:
         analysis["status"] = "dev"
+        changed = True
+
+    legacy_tasks = analysis.pop("tasks", None)
+    if legacy_tasks:
+        files = analysis.setdefault("files", [])
+        existing_paths = {fe.get("path") for fe in files}
+        for task in legacy_tasks:
+            full_path = f"{default_components}/{task.get('file', '')}"
+            if full_path not in existing_paths:
+                files.append({
+                    "path": full_path,
+                    "dpl": task.get("dpl"),
+                    "enabled": task.get("enabled", False),
+                })
+                existing_paths.add(full_path)
+        changed = True
+    elif legacy_tasks is not None:
+        # was present but empty — still remove the now-unused key
         changed = True
 
 if changed:
@@ -192,17 +215,9 @@ for analysis in data.get("analysis", []):
     enabled     = analysis.get("enabled", False)
     description = analysis.get("description", "")
     life_status = analysis.get("status", "dev")
-    tasks       = analysis.get("tasks", [])
 
     on_off = "ON " if enabled else "OFF"
     print(f"  [{on_off}]  {name:<20} [{life_status:<13}] — {description}")
-
-    for task in tasks:
-        tfile   = task.get("file", "?")
-        dpl     = task.get("dpl", "?")
-        tenabled = task.get("enabled", False)
-        tstatus = "ON " if tenabled else "OFF"
-        print(f"           [{tstatus}]  {tfile:<35} → o2-analysis-{dpl}")
 
     files = analysis.get("files", [])
     for fentry in files:
@@ -213,7 +228,7 @@ for analysis in data.get("analysis", []):
         label    = f"→ o2-analysis-{dpl}" if dpl else "(plain file, not a DPL task)"
         print(f"           [{fstatus}]  {fpath:<35} {label}")
 
-    if not tasks and not files:
+    if not files:
         print(f"           (no tasks defined)")
 
 PYEOF
@@ -256,39 +271,28 @@ for analysis in data.get("analysis", []):
     found = True
 
     if task_file is None:
-        # Toggle entire analysis + all its tasks and tracked files
+        # Toggle entire analysis + all its tracked files
         analysis["enabled"] = state
-        for task in analysis.get("tasks", []):
-            task["enabled"] = state
         for fentry in analysis.get("files", []):
             fentry["enabled"] = state
         action = "Enabled" if state else "Disabled"
         print(f"[INFO]    {action} analysis: {analysis_name}")
     else:
-        # Toggle specific task — check the legacy tasks[] array first
-        # (bare filename), then files[] (full path, from --add-file).
+        # Toggle a specific tracked file (full path, from --add-file;
+        # a bare legacy filename also still matches if it was never
+        # migrated to a full path for some reason).
         task_found = False
-        for task in analysis.get("tasks", []):
-            if task.get("file") == task_file:
-                task["enabled"] = state
+        for fentry in analysis.get("files", []):
+            if fentry.get("path") == task_file or fentry.get("path", "").endswith(f"/{task_file}"):
+                fentry["enabled"] = state
                 task_found = True
                 action = "Enabled" if state else "Disabled"
-                print(f"[INFO]    {action} task: {analysis_name}/{task_file}")
+                print(f"[INFO]    {action} file: {analysis_name}/{task_file}")
                 if state:
                     analysis["enabled"] = True
                 break
         if not task_found:
-            for fentry in analysis.get("files", []):
-                if fentry.get("path") == task_file:
-                    fentry["enabled"] = state
-                    task_found = True
-                    action = "Enabled" if state else "Disabled"
-                    print(f"[INFO]    {action} file: {analysis_name}/{task_file}")
-                    if state:
-                        analysis["enabled"] = True
-                    break
-        if not task_found:
-            print(f"[ERROR]   Task/file not found: {task_file} in analysis {analysis_name}")
+            print(f"[ERROR]   File not found: {task_file} in analysis {analysis_name}")
             sys.exit(1)
     break
 
@@ -315,21 +319,16 @@ PYEOF
 # _analysis_get_enabled_tasks
 # Read analysis.json and print "analysis_name full_path dpl_name" for
 # every enabled DPL task in every enabled analysis. Used by
-# _rebuild_tasks(). Merges both schemas so callers never need to know
-# which one an entry came from:
-#   - legacy "tasks[]"  (bare filename) -> full path computed against the
-#     single default O2_PHYSICS_COMPONENTS directory (the only location
-#     that schema ever supported)
-#   - new "files[]"     (full path, from --add-file/--register) -> used
-#     as-is, already correct for any PWG or shared location
+# _rebuild_tasks(). Reads "files[]" only — the legacy "tasks[]" schema
+# is folded into it by _analysis_migrate_schema before this ever runs.
 # ==============================================================================
 _analysis_get_enabled_tasks() {
     local REGISTRY="$1"
 
-    python3 - "$REGISTRY" "$O2_PHYSICS_COMPONENTS" << 'PYEOF'
+    python3 - "$REGISTRY" << 'PYEOF'
 import sys, json
 
-registry_path, default_components = sys.argv[1:]
+registry_path = sys.argv[1]
 with open(registry_path) as f:
     data = json.load(f)
 
@@ -337,12 +336,6 @@ for analysis in data.get("analysis", []):
     if not analysis.get("enabled", False):
         continue
     name = analysis.get("name", "")
-
-    for task in analysis.get("tasks", []):
-        if not task.get("enabled", False):
-            continue
-        full_path = f"{default_components}/{task.get('file', '')}"
-        print(f"{name} {full_path} {task.get('dpl', '')}")
 
     for fentry in analysis.get("files", []):
         if not fentry.get("enabled", False):
@@ -355,33 +348,27 @@ PYEOF
 
 # ==============================================================================
 # _analysis_get_files
-# Print "full_path dpl_or_dash" for every ENABLED file/task belonging to
-# ONE analysis (both legacy tasks[] and new files[]). Unlike
-# _analysis_get_enabled_tasks (which only lists DPL tasks, across ALL
-# enabled analyses, for _rebuild_tasks), this lists everything — plain
-# files included — for a single named analysis, for 'o2 build --cut-pr'
-# to know exactly which files belong in its PR branch. "-" means "plain
-# file, not a DPL task".
+# Print "full_path dpl_or_dash" for every ENABLED file in "files[]"
+# belonging to ONE analysis. Unlike _analysis_get_enabled_tasks (which
+# only lists DPL tasks, across ALL enabled analyses, for
+# _rebuild_tasks), this lists everything — plain files included — for a
+# single named analysis, for 'o2 build --cut-pr' to know exactly which
+# files belong in its PR branch. "-" means "plain file, not a DPL task".
 # ==============================================================================
 _analysis_get_files() {
     local REGISTRY="$1"
     local ANALYSIS="$2"
 
-    python3 - "$REGISTRY" "$ANALYSIS" "$O2_PHYSICS_COMPONENTS" << 'PYEOF'
+    python3 - "$REGISTRY" "$ANALYSIS" << 'PYEOF'
 import sys, json
 
-registry_path, analysis_name, default_components = sys.argv[1:]
+registry_path, analysis_name = sys.argv[1:]
 with open(registry_path) as f:
     data = json.load(f)
 
 for analysis in data.get("analysis", []):
     if analysis.get("name") != analysis_name:
         continue
-    for task in analysis.get("tasks", []):
-        if not task.get("enabled", False):
-            continue
-        full_path = f"{default_components}/{task.get('file', '')}"
-        print(f"{full_path} {task.get('dpl', '-')}")
     for fentry in analysis.get("files", []):
         if not fentry.get("enabled", False):
             continue
@@ -501,7 +488,6 @@ if analysis is None:
         "enabled": False,
         "status": "dev",
         "description": "",
-        "tasks": [],
         "files": [],
     }
     entries.append(analysis)

@@ -382,19 +382,7 @@ cmd_tools_clang_tidy() {
     local WT
     WT=$(_tools_target "$TARGET") || return 1
 
-    # aliBuild's O2Physics-code-check relies on its own dev-package
-    # auto-detection (a directory literally named "O2Physics" under the
-    # work-dir), which today only resolves to the dev worktree. Pointing
-    # it at another worktree needs the build-multiplexing work from
-    # 'o2 build --use' — not done yet, so refuse rather than silently
-    # checking the wrong source.
-    if [ -n "$TARGET" ] && [ "$TARGET" != "dev" ]; then
-        log_error "'o2 tools check --pr $TARGET' isn't supported yet"
-        log_error "(needs 'o2 build --use' to build non-dev worktrees — not implemented yet)"
-        return 1
-    fi
-
-    log_step "O2Physics-code-check (clang-tidy) — base=$BASE head=$HEAD"
+    log_step "O2Physics-code-check (clang-tidy) [${TARGET:-dev}] — base=$BASE head=$HEAD"
     load_apptainer
     detect_resources
     _setup_git_safe
@@ -403,15 +391,30 @@ cmd_tools_clang_tidy() {
     [ "$FIX" -eq 1 ] && FIX_ENV="-e O2PHYSICS_CHECKER_FIX=1"
 
     local ALIBUILD_DEFAULTS="$O2_ALIBUILD_DEFAULTS"
-    local CHECK_LOG="$LOG_DIR/code_check.log"
+    local CHECK_LOG="$LOG_DIR/code_check_${TARGET:-dev}.log"
+
+    # For dev, build from /alice/sw directly (unchanged, original
+    # behavior). For any other worktree, stage it under a directory
+    # literally named "O2Physics" the same way 'o2 build
+    # --build-worktree' does — aliBuild's dev-package auto-detection
+    # only cares about that name existing in its cwd, not which real
+    # worktree it's symlinked to.
+    local CD_TARGET="/alice/sw"
+    if [ -n "$TARGET" ] && [ "$TARGET" != "dev" ]; then
+        local STAGE_REL="O2Physics/.multibuild/$TARGET"
+        _ensure_git_excludes
+        mkdir -p "$SW_DIR/$STAGE_REL"
+        ln -sfn "$WT" "$SW_DIR/$STAGE_REL/O2Physics"
+        CD_TARGET="/alice/sw/$STAGE_REL"
+    fi
 
     _o2_container_raw -- bash -c "
         set -e
         export ALIBUILD_WORK_DIR=/alice/sw
         export ALIBUILD_ANALYTICS=0
         eval \"\$(alienv shell-helper)\"
-        cd /alice/sw
-        aliBuild build O2Physics-code-check --work-dir /alice/sw \
+        cd '$CD_TARGET'
+        aliBuild build O2Physics-code-check --work-dir /alice/sw --config-dir /alice/sw/alidist \
             --defaults '$ALIBUILD_DEFAULTS' \
             -e ALIBUILD_BASE_HASH=$BASE -e ALIBUILD_HEAD_HASH=$HEAD $FIX_ENV
     " 2>&1 | tee "$CHECK_LOG"
@@ -600,14 +603,9 @@ cmd_tools_all() {
     # NOTE: each step runs on its own default scope (files changed vs
     # upstream/master) — same as calling the subcommand alone. There is no
     # pass-through for --all/--pwg here; run the individual subcommand
-    # directly if you need a wider scope. 'check' (clang-tidy) only
-    # supports the dev worktree today (see cmd_tools_clang_tidy) — it's
-    # skipped automatically when --pr/--use targets anything else.
+    # directly if you need a wider scope.
     local -a STEPS=(lint format)
-    if [ "$QUICK" -eq 0 ]; then
-        STEPS+=(cppcheck)
-        [ -z "$TARGET" ] || [ "$TARGET" = "dev" ] && STEPS+=(check)
-    fi
+    [ "$QUICK" -eq 0 ] && STEPS+=(cppcheck check)
 
     local -a FORMAT_ARGS=()
     [ "$FORCE" -eq 0 ] && FORMAT_ARGS=(--check)
@@ -621,7 +619,7 @@ cmd_tools_all() {
             lint)     cmd_tools_lint "${TARGET_ARGS[@]}"                       || FAILED=1 ;;
             format)   cmd_tools_format "${FORMAT_ARGS[@]}" "${TARGET_ARGS[@]}" || FAILED=1 ;;
             cppcheck) cmd_tools_cppcheck "${TARGET_ARGS[@]}"                    || FAILED=1 ;;
-            check)    cmd_tools_clang_tidy                                     || FAILED=1 ;;
+            check)    cmd_tools_clang_tidy "${TARGET_ARGS[@]}"                   || FAILED=1 ;;
         esac
     done
 
@@ -673,13 +671,16 @@ Options:
   --base <hash>   base commit to diff from (default: master)
   --head <hash>   head commit to diff to   (default: HEAD)
   --fix           let clang-tidy apply automatic fixes
-
-Only the dev worktree is supported for now — targeting a PR worktree
-(--pr <NAME>) needs 'o2 build --use', not implemented yet.
+  --pr <NAME>     check a specific worktree instead of dev (also: master)
+                  — --base/--head still apply, adjust them if the
+                  worktree's own history makes the defaults meaningless
+                  (e.g. a detached-HEAD worktree has no "master" of
+                  its own to diff against)
 
 Examples:
   o2 tools check
   o2 tools check --fix
+  o2 tools check --pr proxies
 EOF
 }
 
@@ -742,9 +743,8 @@ Options:
   --force           apply formatting in place instead of --check
   --log-file <path> tee all output to <path>
   --quiet           suppress per-step banners (tool output still shown)
-  --pr <NAME>       run against a specific worktree instead of dev (also:
-                    master) — 'check' is skipped automatically for
-                    anything other than dev (see 'o2 tools check --help')
+  --pr <NAME>       run every step against a specific worktree instead
+                    of dev (also: master)
 EOF
 }
 
