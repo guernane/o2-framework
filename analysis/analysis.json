@@ -5,9 +5,9 @@
       "enabled": true,
       "status": "dev",
       "description": "Pipeline validation test",
-      "tasks": [
+      "files": [
         {
-          "file": "testTask.cxx",
+          "path": "PWGJE/Tasks/testTask.cxx",
           "dpl": "test-task",
           "enabled": true
         }
@@ -18,9 +18,9 @@
       "enabled": false,
       "status": "dev",
       "description": "Track distributions for DELPHES proxies",
-      "tasks": [
+      "files": [
         {
-          "file": "taskProxyBuilder.cxx",
+          "path": "PWGJE/Tasks/taskProxyBuilder.cxx",
           "dpl": "je-proxy-builder",
           "enabled": false
         }

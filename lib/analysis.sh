@@ -24,6 +24,7 @@ cmd_analysis() {
             --add-file)        ACTION="add-file"; TARGET="$2"; ARG2="$3"; shift 3 ;;
             --register)        ACTION="register"; TARGET="$2"; ARG2="$3"; ARG3="$4"; shift 4 ;;
             --promote)         ACTION="promote"; TARGET="$2"; shift 2 ;;
+            --check-deps)      ACTION="check-deps"; TARGET="$2"; shift 2 ;;
             --force)           FORCE=1; shift ;;
             --help|-h)         _analysis_help  ; return ;;
             *) log_error "Unknown option: $1" ; _analysis_help ; return 1 ;;
@@ -49,6 +50,7 @@ cmd_analysis() {
         add-file)   _analysis_add_file    "$REGISTRY" "$TARGET" "$ARG2" ;;
         register)   _analysis_register_task "$REGISTRY" "$TARGET" "$ARG2" "$ARG3" ;;
         promote)    _analysis_promote     "$REGISTRY" "$TARGET" "$FORCE" ;;
+        check-deps) _analysis_check_deps "$TARGET" ;;
         *)          _analysis_list        "$REGISTRY" ;;
     esac
 }
@@ -666,6 +668,10 @@ Options:
                                 'o2 build --rebuild-tasks')
   --promote <analysis> [--force]
                                 mark ready-for-pr (see guards below)
+  --check-deps <analysis>      best-effort check that every table consumed
+                                by the active task chain has a producer also
+                                active in the chain (wraps find_dependencies.py
+                                — see 'o2 tools deps')
   --help                       show this help
 
 Target formats (for --enable/--disable):
@@ -691,10 +697,114 @@ Examples:
   o2 analysis --enable   proxies/PWGJE/Tasks/taskNew.cxx
   o2 analysis --promote  proxies
   o2 analysis --disable  test/testTask.cxx
+  o2 analysis --check-deps proxies
 
 After enabling tasks, rebuild with:
   o2 build --rebuild-tasks
   o2 deploy --build-only
 
 EOF
+}
+
+
+# ==============================================================================
+# _analysis_check_deps
+# 'o2 analysis --check-deps <analysis>'
+#
+# Best-effort dependency check for a workflow's config_tasks.sh: sources the
+# file and calls MakeScriptO2() for real (reflecting the DOO2_* switches as
+# actually set, not every task name merely present in the file text), then
+# for each active task uses O2Physics' own find_dependencies.py (the exact
+# tool behind 'o2 tools deps') to list the tables it consumes, and checks
+# that at least one producer of each table is also active in the chain.
+#
+# Limitation: when a table has several valid producers (e.g. AOD/TRACKDCA
+# can come from either o2-analysis-trackextension or
+# o2-analysis-track-propagation), this only checks that ANY of them is
+# present — it does not arbitrate which one you actually meant. A clean
+# report here does not guarantee the chain is semantically correct, only
+# that no producer is obviously missing.
+#
+# Requires O2Physics to have been built at least once (find_dependencies.py
+# reads the installed package, not the sources) — see 'o2 build'.
+# ==============================================================================
+_analysis_check_deps() {
+    local ANALYSIS="$1"
+    [ -z "$ANALYSIS" ] && { log_error "usage: o2 analysis --check-deps <analysis>"; return 1; }
+
+    local TASKS_FILE="$O2_LOCAL_DIR/analysis/$ANALYSIS/config_tasks.sh"
+    [ -f "$TASKS_FILE" ] || { log_error "$TASKS_FILE not found"; return 1; }
+
+    # Source + call MakeScriptO2() for real, exactly as
+    # _generate_workflow_script (lib/run.sh) does — this reflects the
+    # DOO2_* switches actually set, not every task name that merely
+    # appears somewhere in the file.
+    local PIPE_OUTPUT
+    PIPE_OUTPUT=$(source "$TASKS_FILE"; MakeScriptO2 2>/dev/null) \
+        || { log_error "MakeScriptO2() failed in $TASKS_FILE"; return 1; }
+
+    local -a CHAIN=()
+    mapfile -t CHAIN < <(echo "$PIPE_OUTPUT" | grep -oE '\bo2-analysis[a-zA-Z0-9-]*\b' | sort -u)
+
+    if [ "${#CHAIN[@]}" -eq 0 ]; then
+        log_warn "No task activated in $TASKS_FILE — nothing to check"
+        return 0
+    fi
+
+    log_step "Checking dependency chain for '$ANALYSIS' (${#CHAIN[@]} task(s) active)"
+    printf '    %s\n' "${CHAIN[@]}"
+
+    load_apptainer
+    local MISSING=0
+
+    for TASK in "${CHAIN[@]}"; do
+        # Direct inputs of this task (backward search, level 0 — same tool
+        # and same invocation pattern as cmd_tools_deps in lib/tools.sh)
+        local OUT
+        OUT=$(_o2_container -- bash -c '
+            SCRIPT="$O2PHYSICS_ROOT/share/scripts/find_dependencies.py"
+            if [ ! -f "$SCRIPT" ]; then
+                echo "[ERROR] find_dependencies.py not found — is O2Physics built?" >&2
+                exit 1
+            fi
+            "$SCRIPT" -w "$1" 2>/dev/null
+        ' bash "$TASK") || { log_warn "[$TASK] dependency lookup failed — skipping"; continue; }
+
+        local -a INPUTS=()
+        mapfile -t INPUTS < <(echo "$OUT" | grep -oE "'[A-Za-z0-9_/]+'" | tr -d "'")
+
+        for TABLE in "${INPUTS[@]}"; do
+            # Who can produce this table?
+            local PROD
+            PROD=$(_o2_container -- bash -c '
+                "$O2PHYSICS_ROOT/share/scripts/find_dependencies.py" -t "$1" 2>/dev/null
+            ' bash "$TABLE")
+
+            local -a PRODUCERS=()
+            mapfile -t PRODUCERS < <(echo "$PROD" | grep -oE "'[a-zA-Z0-9-]+'" | tr -d "'")
+
+            # No producer found -> base AOD table, nothing to chain against
+            [ "${#PRODUCERS[@]}" -eq 0 ] && continue
+
+            local FOUND=0
+            for P in "${PRODUCERS[@]}"; do
+                for C in "${CHAIN[@]}"; do
+                    [ "$P" = "$C" ] && FOUND=1 && break 2
+                done
+            done
+
+            if [ "$FOUND" -eq 0 ]; then
+                log_warn "[$TASK] needs $TABLE ← (${PRODUCERS[*]}) — not activated in config_tasks.sh"
+                MISSING=$((MISSING + 1))
+            fi
+        done
+    done
+
+    if [ "$MISSING" -eq 0 ]; then
+        log_info "check-deps: chain looks complete for every table find_dependencies.py could resolve"
+        log_info "(best-effort — does not arbitrate between multiple valid producers)"
+    else
+        log_error "check-deps: $MISSING unmet dependency(ies) — see warnings above"
+        return 1
+    fi
 }

@@ -11,6 +11,9 @@
 #   O2_MAX_FILES     max files per run (0 = unlimited)
 #   O2_DATA_MODE     "local" | "alien"
 #   O2_GROUP_SIZE    files per group
+#   O2_PARALLEL_STREAMS  number of parallel alien.py cp streams (default 4)
+#   O2_RETRY_DOWNLOADS   1 = skip the grid scan, only retry files listed in
+#                        each group's failed.txt (local mode only)
 #   ALICE_CERN_USER  CERN username for alien-token-init
 #
 # Bind mounts (set by lib/run.sh):
@@ -21,6 +24,9 @@
 #   group_NNN/filelist.txt   one file per group
 #                            local mode: absolute host paths via /data/...
 #                            alien mode: alien:///alice/... paths
+#   group_NNN/failed.txt     grid paths that failed to download (local mode
+#                            only; absent/empty when nothing failed) — read
+#                            back by O2_RETRY_DOWNLOADS=1
 #   .n_groups                total number of groups created
 #
 # Exit codes:
@@ -37,7 +43,7 @@ DATA_MODE="${O2_DATA_MODE:-local}"
 GROUP_SIZE="${O2_GROUP_SIZE:-10}"
 OUTPUT_BASE="/output"
 LOCAL_DATA_BASE="/data"
-PARALLEL_STREAMS=4
+PARALLEL_STREAMS="${O2_PARALLEL_STREAMS:-4}"
 
 # Detect data type from production name
 # MC:   digit after LHCYYx  (e.g. LHC25b4b6)
@@ -60,6 +66,7 @@ echo "   Mode       : $DATA_MODE"
 echo "   Runs       : $RUNS"
 echo "   Max files  : ${MAX_FILES:-unlimited}"
 echo "   Group size : $GROUP_SIZE"
+echo "   Parallel   : $PARALLEL_STREAMS"
 echo "   Grid path  : $GRID_PRODUCTION_PATH"
 echo "========================================"
 echo ""
@@ -77,6 +84,11 @@ if ! alien.py pwd &>/dev/null; then
 fi
 echo "[INFO] Grid connection OK"
 echo ""
+
+if [ "${O2_RETRY_DOWNLOADS:-0}" = "1" ]; then
+    _retry_failed_downloads
+    exit 0
+fi
 
 # ------------------------------------------------------------------------------
 # Build list of runs
@@ -146,6 +158,99 @@ GROUP_NUM=0
 FILE_NUM=0
 GROUP_TMP=$(mktemp)
 
+# ------------------------------------------------------------------------------
+# _download_one <grid_path> <local_container_path>
+# Single-file download used both during the initial scan and by
+# _retry_failed_downloads(). Returns 0 on success (file present locally),
+# 1 on failure (local file removed, caller decides what to record).
+# ------------------------------------------------------------------------------
+_download_one() {
+    local GRID_FILE="$1"
+    local LOCAL_FILE_CONTAINER="$2"
+    local LOCAL_DIR_CONTAINER
+    LOCAL_DIR_CONTAINER=$(dirname "$LOCAL_FILE_CONTAINER")
+    mkdir -p "$LOCAL_DIR_CONTAINER"
+
+    echo "[DOWN] $GRID_FILE"
+    if alien.py cp \
+        -S "$PARALLEL_STREAMS" \
+        -cksum \
+        -retry 3 \
+        "$GRID_FILE" \
+        "file://$LOCAL_FILE_CONTAINER" 2>&1; then
+        return 0
+    else
+        echo "[FAIL] $GRID_FILE"
+        rm -f "$LOCAL_FILE_CONTAINER"
+        return 1
+    fi
+}
+
+# ------------------------------------------------------------------------------
+# _retry_failed_downloads
+# O2_RETRY_DOWNLOADS=1: rescan existing group_NNN/failed.txt files under
+# OUTPUT_BASE and retry only those, appending successes to filelist.txt and
+# rewriting failed.txt with whatever is still missing. Does not touch groups
+# that have no failed.txt (nothing to do) and does not create new groups.
+# ------------------------------------------------------------------------------
+_retry_failed_downloads() {
+    if [ "$DATA_MODE" != "local" ]; then
+        echo "[INFO] O2_RETRY_DOWNLOADS=1 has no effect in '$DATA_MODE' mode (nothing is downloaded)"
+        return 0
+    fi
+
+    echo "[INFO] Retry mode: rescanning $OUTPUT_BASE for failed.txt files"
+    local TOTAL_RETRIED=0
+    local TOTAL_FIXED=0
+
+    for GROUP_DIR in "$OUTPUT_BASE"/group_*; do
+        [ -d "$GROUP_DIR" ] || continue
+        local FAILED_FILE="$GROUP_DIR/failed.txt"
+        [ -s "$FAILED_FILE" ] || continue
+
+        local FILELIST="$GROUP_DIR/filelist.txt"
+        local STILL_FAILED
+        STILL_FAILED=$(mktemp)
+        > "$STILL_FAILED"
+
+        local N
+        N=$(wc -l < "$FAILED_FILE")
+        echo "[INFO] $(basename "$GROUP_DIR"): retrying $N failed file(s)"
+
+        while IFS= read -r GRID_FILE; do
+            [ -z "$GRID_FILE" ] && continue
+            TOTAL_RETRIED=$(( TOTAL_RETRIED + 1 ))
+            local REL_PATH="${GRID_FILE#$GRID_PRODUCTION_PATH/}"
+            local LOCAL_FILE_CONTAINER="/data/$PRODUCTION/$REL_PATH"
+
+            if [ -f "$LOCAL_FILE_CONTAINER" ]; then
+                # already fixed by a previous retry pass
+                echo "$LOCAL_FILE_CONTAINER" >> "$FILELIST"
+                TOTAL_FIXED=$(( TOTAL_FIXED + 1 ))
+                continue
+            fi
+
+            if _download_one "$GRID_FILE" "$LOCAL_FILE_CONTAINER"; then
+                echo "$LOCAL_FILE_CONTAINER" >> "$FILELIST"
+                TOTAL_FIXED=$(( TOTAL_FIXED + 1 ))
+            else
+                echo "$GRID_FILE" >> "$STILL_FAILED"
+            fi
+        done < "$FAILED_FILE"
+
+        mv "$STILL_FAILED" "$FAILED_FILE"
+        [ -s "$FAILED_FILE" ] || rm -f "$FAILED_FILE"
+    done
+
+    echo ""
+    echo "========================================"
+    echo "   Retry complete"
+    echo "   Retried       : $TOTAL_RETRIED"
+    echo "   Fixed         : $TOTAL_FIXED"
+    echo "   Still failing : $(( TOTAL_RETRIED - TOTAL_FIXED ))"
+    echo "========================================"
+}
+
 _write_group() {
     local GNUM="$1"
     local GROUP_FILE="$2"   # temp file with list of grid paths for this group
@@ -173,15 +278,14 @@ _write_group() {
         local DOWNLOADED=0
         local SKIPPED=0
         local FAILED=0
+        local FAILED_FILE="$GROUP_DIR/failed.txt"
+        > "$FAILED_FILE"
 
         while IFS= read -r GRID_FILE; do
             [ -z "$GRID_FILE" ] && continue
 
             local REL_PATH="${GRID_FILE#$GRID_PRODUCTION_PATH/}"
             local LOCAL_FILE_CONTAINER="/data/$PRODUCTION/$REL_PATH"
-            local LOCAL_DIR_CONTAINER
-            LOCAL_DIR_CONTAINER=$(dirname "$LOCAL_FILE_CONTAINER")
-            mkdir -p "$LOCAL_DIR_CONTAINER"
 
             if [ -f "$LOCAL_FILE_CONTAINER" ]; then
                 echo "$LOCAL_FILE_CONTAINER" >> "$FILELIST"
@@ -189,25 +293,20 @@ _write_group() {
                 continue
             fi
 
-            echo "[DOWN] $GRID_FILE"
-            if alien.py cp \
-                -S "$PARALLEL_STREAMS" \
-                -cksum \
-                -retry 3 \
-                "$GRID_FILE" \
-                "file://$LOCAL_FILE_CONTAINER" 2>&1; then
+            if _download_one "$GRID_FILE" "$LOCAL_FILE_CONTAINER"; then
                 echo "$LOCAL_FILE_CONTAINER" >> "$FILELIST"
                 DOWNLOADED=$(( DOWNLOADED + 1 ))
             else
-                echo "[FAIL] $GRID_FILE"
-                rm -f "$LOCAL_FILE_CONTAINER"
+                echo "$GRID_FILE" >> "$FAILED_FILE"
                 FAILED=$(( FAILED + 1 ))
             fi
         done < "$GROUP_FILE"
 
+        [ -s "$FAILED_FILE" ] || rm -f "$FAILED_FILE"
+
         echo "[INFO] $GROUP_TAG: $N_FILES file(s) — downloaded=$DOWNLOADED skipped=$SKIPPED failed=$FAILED"
         [ "$FAILED" -gt 0 ] && \
-            echo "[WARNING] $FAILED download(s) failed in $GROUP_TAG"
+            echo "[WARNING] $FAILED download(s) failed in $GROUP_TAG — recorded in $FAILED_FILE, retry with O2_RETRY_DOWNLOADS=1"
     fi
 }
 

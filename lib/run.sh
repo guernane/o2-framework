@@ -30,6 +30,8 @@ cmd_run() {
     local RUNS="all"
     local DATA_MODE_OVERRIDE=""
     local RESUME=0
+    local PARALLEL_OVERRIDE=""  # --parallel: alien.py cp stream count for this run
+    local RETRY_DOWNLOADS_OVERRIDE=0  # --retry-downloads: patch up failed downloads only
     local GROUP_OVERRIDE=""   # internal: set by OAR job script
     local HPC_MODE=0          # --hpc: drive everything from the local machine
     local USE_NAME=""         # --use: run against a specific built worktree
@@ -40,6 +42,8 @@ cmd_run() {
             --mode)    shift; DATA_MODE_OVERRIDE="$1" ;;
             --group)   shift; GROUP_OVERRIDE="$1" ;;
             --resume)  RESUME=1 ;;
+            --parallel) shift; PARALLEL_OVERRIDE="$1" ;;
+            --retry-downloads) RETRY_DOWNLOADS_OVERRIDE=1 ;;
             --hpc)     HPC_MODE=1 ;;
             --use)     shift; USE_NAME="$1" ;;
             --help|-h) _run_help; return 0 ;;
@@ -114,7 +118,7 @@ print(data.get('worktrees', {}).get('$USE_NAME', {}).get('tag', ''))
     log_info "Environment : $ENV_TYPE"
     log_sep
 
-    _resolve_files   "$WORKFLOW" "$PRODUCTION" "$RUNS" "$RESUME"
+    _resolve_files   "$WORKFLOW" "$PRODUCTION" "$RUNS" "$RESUME" "$PARALLEL_OVERRIDE" "$RETRY_DOWNLOADS_OVERRIDE"
     _generate_workflow_script "$WORKFLOW" "$PRODUCTION"
     _init_bookkeeping "$WORKFLOW" "$PRODUCTION" "$RUNS" "$RESUME"
 
@@ -169,6 +173,13 @@ Options:
   --hpc        drive everything from here, jobs run on the cluster
   --use <name> run against a specific built worktree instead of dev's
                default (dev/master/a PR name — see 'o2 build --list')
+  --parallel N number of parallel alien.py cp download streams
+               (default: 4, or O2_PARALLEL_STREAMS in o2_config.sh)
+  --retry-downloads
+               only retry files that failed to download in a previous
+               run (per-group failed.txt) — does not rescan the Grid or
+               regroup; combine with --resume to also skip already-
+               successful compute groups
 
 A fully successful plain local run (no --hpc) automatically bumps the
 workflow's analysis.json status from dev to tested-local. Cluster runs
@@ -182,6 +193,7 @@ Examples:
   o2 run proxies LHC24aj --mode alien
   o2 run proxies LHC24aj --resume
   o2 run proxies LHC24aj --use master
+  o2 run proxies LHC24aj --retry-downloads --resume
 EOF
 }
 
@@ -202,8 +214,43 @@ _resolve_files() {
     local PROD="$2"
     local RUNS="$3"
     local RESUME="${4:-0}"
+    local PARALLEL="${5:-}"
+    local RETRY_DOWNLOADS="${6:-0}"
 
     local N_GROUPS_FILE="$WORKFLOW_OUTPUT/.n_groups"
+
+    local GET_AOD_SCRIPT="$SCRIPTS_DIR/get_aod.sh"
+    [ -f "$GET_AOD_SCRIPT" ] || { log_error "get_aod.sh not found in $SCRIPTS_DIR"; exit 1; }
+
+    # --retry-downloads: only meaningful once groups already exist. Re-enters
+    # the container in O2_RETRY_DOWNLOADS mode — get_aod.sh skips the grid
+    # scan entirely and only retries files listed in each group's failed.txt.
+    # Falls through to a normal fresh resolution below if nothing exists yet.
+    if [ "$RETRY_DOWNLOADS" -eq 1 ] && [ -f "$N_GROUPS_FILE" ]; then
+        log_info "Retrying failed downloads for existing groups of $PROD..."
+
+        mkdir -p "$DATA_BASE/$PROD"
+
+        _o2_container \
+            -B "$(dirname "$GET_AOD_SCRIPT"):/workdir_scripts" \
+            -B "$DATA_BASE:/data" \
+            -B "$WORKFLOW_OUTPUT:/output" \
+            -- bash -c "
+                export O2_PRODUCTION='$PROD'
+                export O2_RUNS='$RUNS'
+                export O2_MAX_FILES='${O2_MAX_FILES:-0}'
+                export O2_DATA_MODE='$O2_DATA_MODE'
+                export O2_GROUP_SIZE='$O2_GROUP_SIZE'
+                export O2_PARALLEL_STREAMS='${PARALLEL:-${O2_PARALLEL_STREAMS:-4}}'
+                export O2_RETRY_DOWNLOADS=1
+                export ALICE_CERN_USER='$ALICE_CERN_USER'
+                bash /workdir_scripts/get_aod.sh
+            " 2>&1 | tee "$LOG_DIR/get_aod_retry_${WF_NAME}_${PROD}.log"
+
+        N_GROUPS=$(cat "$N_GROUPS_FILE")
+        log_info "Retry complete — proceeding with $N_GROUPS group(s)"
+        return
+    fi
 
     if [ "$RESUME" -eq 1 ] && [ -f "$N_GROUPS_FILE" ]; then
         N_GROUPS=$(cat "$N_GROUPS_FILE")
@@ -212,9 +259,6 @@ _resolve_files() {
     fi
 
     log_info "Resolving files for $PROD (mode: $O2_DATA_MODE)..."
-
-    local GET_AOD_SCRIPT="$SCRIPTS_DIR/get_aod.sh"
-    [ -f "$GET_AOD_SCRIPT" ] || { log_error "get_aod.sh not found in $SCRIPTS_DIR"; exit 1; }
 
     mkdir -p "$DATA_BASE/$PROD"
 
@@ -228,6 +272,7 @@ _resolve_files() {
             export O2_MAX_FILES='${O2_MAX_FILES:-0}'
             export O2_DATA_MODE='$O2_DATA_MODE'
             export O2_GROUP_SIZE='$O2_GROUP_SIZE'
+            export O2_PARALLEL_STREAMS='${PARALLEL:-${O2_PARALLEL_STREAMS:-4}}'
             export ALICE_CERN_USER='$ALICE_CERN_USER'
             bash /workdir_scripts/get_aod.sh
         " 2>&1 | tee "$LOG_DIR/get_aod_${WF_NAME}_${PROD}.log"
@@ -281,6 +326,24 @@ HEADER
     echo "# DPL pipeline" >> "$GENERATED"
     MakeScriptO2 >> "$GENERATED"
 
+    # Optional: derived/skimmed AOD output. Added ONCE, right before the
+    # trailing '-b --run' — same "once, not per task" convention already
+    # used by MakeScriptO2() for --aod-file / --configuration json://.
+    # NOTE: --input/--output syntax for o2-aod-merger at merge time (lib/merge.sh)
+    # and this insertion point have not been run against a live O2Physics
+    # container yet — verify on a real workflow before relying on this.
+    if [ -f "$WORKFLOW_DIR/writer-config.json" ]; then
+        if grep -qE -- '^[[:space:]]*-b[[:space:]]+--run[[:space:]]*$' "$GENERATED"; then
+            sed -i -E \
+                "s#^([[:space:]]*)-b[[:space:]]+--run[[:space:]]*\$#\\1--aod-writer-json /analysis/writer-config.json \\\\\n\\1-b --run#" \
+                "$GENERATED"
+            log_info "Derived AOD output enabled (writer-config.json found)"
+        else
+            log_warn "writer-config.json present but no trailing '-b --run' line found in the" \
+                     "generated pipeline — --aod-writer-json NOT injected, check config_tasks.sh"
+        fi
+    fi
+
     chmod +x "$GENERATED"
     log_info "Workflow script: $GENERATED"
 
@@ -304,6 +367,12 @@ _bake_run_bundle() {
     local HOOKS_FILE="$WORKFLOW_OUTPUT/.hooks.sh"
 
     cp "$WORKFLOW_DIR/dpl-config.json" "$WORKFLOW_OUTPUT/dpl-config.json"
+
+    # Optional: derived/skimmed AOD output descriptor (OutputDirector /
+    # OutputDescriptors JSON) — copied only if the workflow defines one.
+    if [ -f "$WORKFLOW_DIR/writer-config.json" ]; then
+        cp "$WORKFLOW_DIR/writer-config.json" "$WORKFLOW_OUTPUT/writer-config.json"
+    fi
 
     {
         type AdjustJson &>/dev/null && declare -f AdjustJson

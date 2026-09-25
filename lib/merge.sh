@@ -2,6 +2,11 @@
 # ==============================================================================
 # lib/merge.sh
 # Merge AnalysisResults.root files from all completed groups using hadd.
+# Also merges derived/skimmed AO2D.root outputs, when present, using
+# o2-aod-merger (NOT hadd — hadd does not correctly handle AOD time-frame
+# metadata / BC deduplication across files). AO2D.root only exists for
+# workflows that define a writer-config.json — see _generate_workflow_script
+# in lib/run.sh. Silently skipped for every other workflow.
 # Consolidates bookkeeping fragment JSONs into the main JSON file.
 # Sourced by o2.sh — never executed directly.
 #
@@ -50,6 +55,7 @@ cmd_merge() {
     _consolidate_bookkeeping
     _collect_outputs "$FORCE"
     _run_hadd "$MERGE_DIR" "$MERGE_OUTPUT" "$MERGE_LOG"
+    _run_aod_merge "$MERGE_DIR" "$MERGE_LOG"
     _finalize_bookkeeping "$MERGE_OUTPUT"
     _merge_summary "$MERGE_OUTPUT"
 }
@@ -64,6 +70,12 @@ Arguments:
 
 Options:
   --force    merge available groups even if some failed
+
+Notes:
+  AnalysisResults.root is always merged with hadd.
+  AO2D.root (derived/skimmed AOD, only present if the workflow defines a
+  writer-config.json) is merged separately with o2-aod-merger — automatic,
+  no extra flag needed, silently skipped when the workflow produces none.
 EOF
 }
 
@@ -219,6 +231,70 @@ _run_hadd() {
 }
 
 # ==============================================================================
+# _run_aod_merge
+# Merge derived/skimmed AO2D.root outputs (produced only when the workflow's
+# writer-config.json enables --aod-writer-json — see _generate_workflow_script
+# in lib/run.sh) using o2-aod-merger instead of hadd.
+#
+# No-op (returns 0 immediately) if no completed group produced an AO2D.root —
+# this is the normal case for every workflow that does not use derived output.
+#
+# NOT YET VALIDATED against a live O2Physics container: the --input/--output
+# syntax below follows o2-aod-merger's documented usage in O2DPG production
+# scripts, but hasn't been run end-to-end from this framework. Check
+# $MERGE_LOG on first use.
+# ==============================================================================
+_run_aod_merge() {
+    local MERGE_DIR="$1"
+    local MERGE_LOG="$2"
+
+    # Reuse the completed-groups list _collect_outputs already built
+    # (MERGE_INPUTS holds host paths to .../group_NNN/AnalysisResults.root)
+    local AOD_INPUTS=()
+    for RESULTS_PATH in "${MERGE_INPUTS[@]}"; do
+        local CANDIDATE="${RESULTS_PATH%AnalysisResults.root}AO2D.root"
+        [ -f "$CANDIDATE" ] && AOD_INPUTS+=("$CANDIDATE")
+    done
+
+    if [ "${#AOD_INPUTS[@]}" -eq 0 ]; then
+        return 0
+    fi
+
+    if [ "${#AOD_INPUTS[@]}" -ne "${#MERGE_INPUTS[@]}" ]; then
+        log_warn "AO2D.root found for ${#AOD_INPUTS[@]}/${#MERGE_INPUTS[@]} completed group(s) — merging what's available"
+    fi
+
+    log_info "Merging ${#AOD_INPUTS[@]} derived AO2D.root file(s) with o2-aod-merger..."
+
+    local AOD_OUTPUT="$MERGE_DIR/AO2D.root"
+    local AOD_LIST_HOST="$MERGE_DIR/aod_merge_list.txt"
+    local AOD_LIST_CONTAINER="/output/merge/aod_merge_list.txt"
+    local AOD_OUTPUT_CONTAINER="/output/merge/AO2D.root"
+
+    # Container-side paths, one per line — o2-aod-merger --input expects a
+    # text file listing the inputs, same convention as filelist.txt elsewhere
+    # in this framework.
+    > "$AOD_LIST_HOST"
+    for HOST_PATH in "${AOD_INPUTS[@]}"; do
+        echo "/output/${HOST_PATH#$WORKFLOW_OUTPUT/}" >> "$AOD_LIST_HOST"
+    done
+
+    local EXIT_CODE=0
+    _o2_container \
+        -B "$WORKFLOW_OUTPUT:/output" \
+        -- bash -c "
+            o2-aod-merger --input ${AOD_LIST_CONTAINER} --output ${AOD_OUTPUT_CONTAINER}
+        " 2>&1 | tee -a "$MERGE_LOG" || EXIT_CODE=$?
+
+    if [ "$EXIT_CODE" -ne 0 ] || [ ! -f "$AOD_OUTPUT" ]; then
+        log_error "o2-aod-merger failed — check $MERGE_LOG (AnalysisResults.root merge above is unaffected)"
+        return 1
+    fi
+
+    log_info "Derived AOD merged: $AOD_OUTPUT"
+}
+
+# ==============================================================================
 # _finalize_bookkeeping
 # ==============================================================================
 _finalize_bookkeeping() {
@@ -274,5 +350,12 @@ _merge_summary() {
     [ "$(( N_FAILED + N_MISSING ))" -gt 0 ] && \
         log_warn "Skipped : $(( N_FAILED + N_MISSING )) group(s)"
     log_info "Output  : $MERGE_OUTPUT ($SIZE)"
+    local AOD_OUTPUT
+    AOD_OUTPUT="$(dirname "$MERGE_OUTPUT")/AO2D.root"
+    if [ -f "$AOD_OUTPUT" ]; then
+        local AOD_SIZE
+        AOD_SIZE=$(du -sh "$AOD_OUTPUT" 2>/dev/null | cut -f1)
+        log_info "Derived : $AOD_OUTPUT ($AOD_SIZE)"
+    fi
     log_sep
 }
