@@ -230,6 +230,10 @@ _status_overview() {
 
 # ==============================================================================
 # _status_failed
+# For each failed group, also greps its run log for the error patterns O2's
+# own Troubleshooting doc recommends looking for (ERROR/FATAL/CRITICAL,
+# segfaults, "command not found", etc.) — automates what would otherwise be
+# a manual grep per failed group.
 # ==============================================================================
 _status_failed() {
     local WF="$1"
@@ -253,6 +257,18 @@ _status_failed() {
                 EXIT_CODE=$(echo "$FRAG_JSON" | jq -r '.exit_code // "-"' 2>/dev/null)
                 echo "  $GROUP   OAR=$OAR_ID   exit=$EXIT_CODE"
                 FOUND=$(( FOUND + 1 ))
+
+                local GROUP_LOG="$LOG_DIR/run_${WF}_${PROD}_${GROUP}.log"
+                if [ -f "$GROUP_LOG" ]; then
+                    local ERR_PATTERN='\[ERROR\]|\[FATAL\]|\[CRITICAL\]|[Ss]egmentation|SEGMENTATION|command not found|Program crashed|Error:|Error in |\[WARN\]|Warning in '
+                    local N_MATCHES
+                    N_MATCHES=$(grep -aEc "$ERR_PATTERN" "$GROUP_LOG" 2>/dev/null)
+                    N_MATCHES="${N_MATCHES:-0}"
+                    if [ "$N_MATCHES" -gt 0 ]; then
+                        grep -aE "$ERR_PATTERN" "$GROUP_LOG" | head -5 | sed 's/^/      /'
+                        [ "$N_MATCHES" -gt 5 ] && echo "      ... ($N_MATCHES total matches — see $GROUP_LOG)"
+                    fi
+                fi
             fi
             FRAG_JSON=""
         else

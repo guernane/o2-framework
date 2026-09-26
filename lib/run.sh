@@ -32,6 +32,7 @@ cmd_run() {
     local RESUME=0
     local PARALLEL_OVERRIDE=""  # --parallel: alien.py cp stream count for this run
     local RETRY_DOWNLOADS_OVERRIDE=0  # --retry-downloads: patch up failed downloads only
+    local SHM_OVERRIDE=""  # --shm-segment-size: bytes, passed to the DPL driver
     local GROUP_OVERRIDE=""   # internal: set by OAR job script
     local HPC_MODE=0          # --hpc: drive everything from the local machine
     local USE_NAME=""         # --use: run against a specific built worktree
@@ -44,6 +45,7 @@ cmd_run() {
             --resume)  RESUME=1 ;;
             --parallel) shift; PARALLEL_OVERRIDE="$1" ;;
             --retry-downloads) RETRY_DOWNLOADS_OVERRIDE=1 ;;
+            --shm-segment-size) shift; SHM_OVERRIDE="$1" ;;
             --hpc)     HPC_MODE=1 ;;
             --use)     shift; USE_NAME="$1" ;;
             --help|-h) _run_help; return 0 ;;
@@ -119,7 +121,7 @@ print(data.get('worktrees', {}).get('$USE_NAME', {}).get('tag', ''))
     log_sep
 
     _resolve_files   "$WORKFLOW" "$PRODUCTION" "$RUNS" "$RESUME" "$PARALLEL_OVERRIDE" "$RETRY_DOWNLOADS_OVERRIDE"
-    _generate_workflow_script "$WORKFLOW" "$PRODUCTION"
+    _generate_workflow_script "$WORKFLOW" "$PRODUCTION" "$SHM_OVERRIDE"
     _init_bookkeeping "$WORKFLOW" "$PRODUCTION" "$RUNS" "$RESUME"
 
     if [ "$HPC_MODE" -eq 1 ]; then
@@ -180,6 +182,11 @@ Options:
                run (per-group failed.txt) — does not rescan the Grid or
                regroup; combine with --resume to also skip already-
                successful compute groups
+  --shm-segment-size N
+               DPL shared-memory segment size in bytes (default: O2's own,
+               90% of system VSIZE or 2GB — see Troubleshooting: "shmem:
+               could not create a message"). Also settable as
+               O2_SHM_SEGMENT_SIZE in o2_config.sh.
 
 A fully successful plain local run (no --hpc) automatically bumps the
 workflow's analysis.json status from dev to tested-local. Cluster runs
@@ -194,6 +201,7 @@ Examples:
   o2 run proxies LHC24aj --resume
   o2 run proxies LHC24aj --use master
   o2 run proxies LHC24aj --retry-downloads --resume
+  o2 run proxies LHC24aj --shm-segment-size 1500000000
 EOF
 }
 
@@ -209,6 +217,21 @@ _validate_data_mode() {
 # Run get_aod.sh inside the container to find/download AOD files and create
 # group filelists under WORKFLOW_OUTPUT.
 # ==============================================================================
+# ==============================================================================
+# _check_grid_token
+# Pre-flight check before touching the Grid (fresh file resolution or
+# --retry-downloads): fails fast with a clear message instead of letting
+# get_aod.sh discover an expired token file-by-file — or, worse, after an
+# --hpc job has already queued on OAR. Same check as 'o2 status proxy'.
+# ==============================================================================
+_check_grid_token() {
+    if _o2_container -- bash -c 'alien.py pwd' >/dev/null 2>&1; then
+        return 0
+    fi
+    log_error "ALICE Grid token invalid or expired — run 'o2 status proxy --renew' first"
+    return 1
+}
+
 _resolve_files() {
     local WF_NAME="$1"
     local PROD="$2"
@@ -227,6 +250,8 @@ _resolve_files() {
     # scan entirely and only retries files listed in each group's failed.txt.
     # Falls through to a normal fresh resolution below if nothing exists yet.
     if [ "$RETRY_DOWNLOADS" -eq 1 ] && [ -f "$N_GROUPS_FILE" ]; then
+        _check_grid_token || exit 1
+
         log_info "Retrying failed downloads for existing groups of $PROD..."
 
         mkdir -p "$DATA_BASE/$PROD"
@@ -257,6 +282,8 @@ _resolve_files() {
         log_info "Resume mode: $N_GROUPS existing group(s)"
         return
     fi
+
+    _check_grid_token || exit 1
 
     log_info "Resolving files for $PROD (mode: $O2_DATA_MODE)..."
 
@@ -297,6 +324,7 @@ _resolve_files() {
 _generate_workflow_script() {
     local WF_NAME="$1"
     local PROD="$2"
+    local SHM_SIZE="${3:-}"
     local GENERATED="$WORKFLOW_OUTPUT/run_generated.sh"
 
     log_info "Generating workflow script from $WORKFLOW_DIR/config_tasks.sh ..."
@@ -341,6 +369,23 @@ HEADER
         else
             log_warn "writer-config.json present but no trailing '-b --run' line found in the" \
                      "generated pipeline — --aod-writer-json NOT injected, check config_tasks.sh"
+        fi
+    fi
+
+    # Optional: DPL shared-memory segment size (bytes). Same injection
+    # convention as --aod-writer-json above — added once, right before the
+    # trailing '-b --run'. See Troubleshooting: "shmem: could not create a
+    # message" in the O2 docs.
+    local SHM_EFFECTIVE="${SHM_SIZE:-${O2_SHM_SEGMENT_SIZE:-}}"
+    if [ -n "$SHM_EFFECTIVE" ]; then
+        if grep -qE -- '^[[:space:]]*-b[[:space:]]+--run[[:space:]]*$' "$GENERATED"; then
+            sed -i -E \
+                "s#^([[:space:]]*)-b[[:space:]]+--run[[:space:]]*\$#\\1--shm-segment-size $SHM_EFFECTIVE \\\\\n\\1-b --run#" \
+                "$GENERATED"
+            log_info "shm-segment-size set to $SHM_EFFECTIVE bytes"
+        else
+            log_warn "shm-segment-size requested but no trailing '-b --run' line found in the" \
+                     "generated pipeline — NOT injected, check config_tasks.sh"
         fi
     fi
 
