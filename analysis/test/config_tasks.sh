@@ -30,20 +30,20 @@
 
 # Helper tasks (required for Run 3 data)
 DOO2_TIMESTAMP=0            # o2-analysis-timestamp
-DOO2_TRACK_PROPAGATION=1    # o2-analysis-propagationservice
-DOO2_EVENT_SELECTION=1      # o2-analysis-event-selection-service
+DOO2_TRACK_PROPAGATION=0    # o2-analysis-propagationservice
+DOO2_EVENT_SELECTION=0      # o2-analysis-event-selection-service
 DOO2_MULTIPLICITY_TABLE=0   # o2-analysis-multiplicity-table
 DOO2_TRACK_EXTENSION=0      # o2-analysis-trackextension
-DOO2_TRACK_TO_COLLISION=1   # o2-analysis-track-to-collision-associator
-DOO2_TRACK_SELECTION=1      # o2-analysis-trackselection
+DOO2_TRACK_TO_COLLISION=0   # o2-analysis-track-to-collision-associator
+DOO2_TRACK_SELECTION=0      # o2-analysis-trackselection
 
 # Jet framework
 DOO2_JET_FINDER=0           # o2-analysis-je-jet-finder-charged
 DOO2_JET_TRACK_QA=0         # o2-analysis-je-jet-track-qa
 DOO2_JET_VALIDATION=0       # o2-analysis-je-jet-validation-qa-charged
-DOO2_MULTCENTTABLE=1         # o2-analysis-multcenttable
-DOO2_FT0_CORRECTED=1         # o2-analysis-ft0-corrected-table
-DOO2_TRACKQA=1               # o2-analysis-trackqa
+DOO2_MULTCENTTABLE=0         # o2-analysis-multcenttable
+DOO2_FT0_CORRECTED=0         # o2-analysis-ft0-corrected-table
+DOO2_TRACKQA=0               # o2-analysis-trackqa
 
 # User tasks (from your O2Physics fork, PWGJE/Tasks/)
 DOO2_USER_TEST_TASK=1       # o2-analysis-je-test-task

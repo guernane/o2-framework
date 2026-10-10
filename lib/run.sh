@@ -217,21 +217,6 @@ _validate_data_mode() {
 # Run get_aod.sh inside the container to find/download AOD files and create
 # group filelists under WORKFLOW_OUTPUT.
 # ==============================================================================
-# ==============================================================================
-# _check_grid_token
-# Pre-flight check before touching the Grid (fresh file resolution or
-# --retry-downloads): fails fast with a clear message instead of letting
-# get_aod.sh discover an expired token file-by-file — or, worse, after an
-# --hpc job has already queued on OAR. Same check as 'o2 status proxy'.
-# ==============================================================================
-_check_grid_token() {
-    if _o2_container -- bash -c 'alien.py pwd' >/dev/null 2>&1; then
-        return 0
-    fi
-    log_error "ALICE Grid token invalid or expired — run 'o2 status proxy --renew' first"
-    return 1
-}
-
 _resolve_files() {
     local WF_NAME="$1"
     local PROD="$2"

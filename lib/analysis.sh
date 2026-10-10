@@ -24,7 +24,9 @@ cmd_analysis() {
             --add-file)        ACTION="add-file"; TARGET="$2"; ARG2="$3"; shift 3 ;;
             --register)        ACTION="register"; TARGET="$2"; ARG2="$3"; ARG3="$4"; shift 4 ;;
             --promote)         ACTION="promote"; TARGET="$2"; shift 2 ;;
-            --check-deps)      ACTION="check-deps"; TARGET="$2"; shift 2 ;;
+            --check-deps)      ACTION="check-deps"; TARGET="$2"; shift 2
+                               # optional <production>: a positional word, not another option
+                               if [[ $# -gt 0 && "$1" != -* ]]; then ARG2="$1"; shift; fi ;;
             --force)           FORCE=1; shift ;;
             --help|-h)         _analysis_help  ; return ;;
             *) log_error "Unknown option: $1" ; _analysis_help ; return 1 ;;
@@ -50,7 +52,7 @@ cmd_analysis() {
         add-file)   _analysis_add_file    "$REGISTRY" "$TARGET" "$ARG2" ;;
         register)   _analysis_register_task "$REGISTRY" "$TARGET" "$ARG2" "$ARG3" ;;
         promote)    _analysis_promote     "$REGISTRY" "$TARGET" "$FORCE" ;;
-        check-deps) _analysis_check_deps "$TARGET" ;;
+        check-deps) _analysis_check_deps "$TARGET" "$ARG2" ;;
         *)          _analysis_list        "$REGISTRY" ;;
     esac
 }
@@ -668,10 +670,14 @@ Options:
                                 'o2 build --rebuild-tasks')
   --promote <analysis> [--force]
                                 mark ready-for-pr (see guards below)
-  --check-deps <analysis>      best-effort check that every table consumed
+  --check-deps <analysis> [<production>]
+                               best-effort check that every table consumed
                                 by the active task chain has a producer also
                                 active in the chain (wraps find_dependencies.py
-                                — see 'o2 tools deps')
+                                — see 'o2 tools deps'). With a <production>,
+                                tables stored in the AO2D itself are checked
+                                against a real input file: a cached one, else
+                                ONE sample file is downloaded to the data cache.
   --help                       show this help
 
 Target formats (for --enable/--disable):
@@ -698,6 +704,7 @@ Examples:
   o2 analysis --promote  proxies
   o2 analysis --disable  test/testTask.cxx
   o2 analysis --check-deps proxies
+  o2 analysis --check-deps proxies LHC24aj
 
 After enabling tasks, rebuild with:
   o2 build --rebuild-tasks
@@ -707,9 +714,156 @@ EOF
 }
 
 
+# ------------------------------------------------------------------------------
+# Input-file inspection helpers for
+#   o2 analysis --check-deps <analysis> <production>
+#
+# Idea: some tables flagged by find_dependencies.py are NOT produced by a task
+# at all, they are stored in the AO2D file itself. For those, the input file
+# answers the question definitively, which beats guessing from the table name.
+# Tables that are computed at runtime (e.g. pidTPCFull*) never exist in the
+# file, so the file can neither confirm nor refute them.
+# ------------------------------------------------------------------------------
+
+# _analysis_find_local_ao2d <production>
+# Prints the host path of one already-downloaded AO2D.root of this production
+# (any run), or returns 1 when there is none.
+_analysis_find_local_ao2d() {
+    local PROD="$1" F
+    [ -d "$DATA_BASE/$PROD" ] || return 1
+    F=$(find "$DATA_BASE/$PROD" -name AO2D.root -type f -print -quit 2>/dev/null)
+    [ -n "$F" ] || return 1
+    echo "$F"
+}
+
+# _analysis_fetch_sample_ao2d <production>
+# Downloads ONE AO2D.root (first file of the first run that has any) into the
+# shared data cache, using get_aod.sh in sample mode, and prints its host path.
+# Sample mode writes no group files, so it cannot disturb a real 'o2 run' of
+# the same production, and that run will reuse the file instead of fetching it
+# again. Only the final path goes to stdout (the caller captures it).
+_analysis_fetch_sample_ao2d() {
+    local PROD="$1"
+    local GET_AOD_SCRIPT="$SCRIPTS_DIR/get_aod.sh"
+    [ -f "$GET_AOD_SCRIPT" ] || { echo "get_aod.sh not found in $SCRIPTS_DIR" >&2; return 1; }
+
+    _check_grid_token || return 1
+    mkdir -p "$DATA_BASE/$PROD"
+
+    local OUT LINE
+    OUT=$(_o2_container \
+        -B "$(dirname "$GET_AOD_SCRIPT"):/workdir_scripts" \
+        -B "$DATA_BASE:/data" \
+        -- bash -c "
+            export O2_PRODUCTION='$PROD'
+            export O2_RUNS='all'
+            export O2_DATA_MODE='local'
+            export O2_SAMPLE_ONLY=1
+            export O2_PARALLEL_STREAMS='${O2_PARALLEL_STREAMS:-4}'
+            export ALICE_CERN_USER='$ALICE_CERN_USER'
+            bash /workdir_scripts/get_aod.sh
+        " 2>&1) || { echo "$OUT" | grep '^\[' | tail -25 >&2; return 1; }
+
+    LINE=$(echo "$OUT" | grep '^SAMPLE_FILE=' | tail -1)
+    [ -n "$LINE" ] || { echo "$OUT" | grep '^\[' | tail -25 >&2; return 1; }
+    echo "$DATA_BASE/${LINE#SAMPLE_FILE=/data/}"
+}
+
+# _analysis_list_trees <host_file>
+# Lists the TTree names inside the FIRST DF_* directory of an AO2D.root (all
+# DFs of a file normally hold the same set of trees). Emits marker lines:
+#   ###DF### <dir> (of N)      ###TREE### <name>      ###ERROR### <message>
+# Never fails on its own: any problem (file unreadable, PyROOT missing...)
+# comes back as an ###ERROR### line so the caller can fall back cleanly.
+_analysis_list_trees() {
+    local HOST_FILE="$1"
+    local CONT_FILE="/data/${HOST_FILE#$DATA_BASE/}"
+    local PY='
+import sys
+try:
+    import ROOT
+    ROOT.gErrorIgnoreLevel = ROOT.kError
+    f = ROOT.TFile.Open(sys.argv[1])
+    if not f or f.IsZombie():
+        print("###ERROR### cannot open " + sys.argv[1])
+        sys.exit(0)
+    dfs = sorted(k.GetName() for k in f.GetListOfKeys() if k.GetName().startswith("DF_"))
+    if not dfs:
+        print("###ERROR### no DF_ directory in the file")
+        sys.exit(0)
+    d = f.Get(dfs[0])
+    print("###DF### " + dfs[0] + " (of " + str(len(dfs)) + ")")
+    for k in d.GetListOfKeys():
+        print("###TREE### " + k.GetName())
+except Exception as e:
+    print("###ERROR### " + str(e))
+'
+    _o2_container -B "$DATA_BASE:/data" \
+        -- bash -c 'python3 -c "$1" "$2"' bash "$PY" "$CONT_FILE" 2>&1
+}
+
+# _analysis_tree_present <lowercase-name> <newline-separated trees>
+_analysis_tree_present() {
+    grep -qxF -- "$1" <<< "$2"
+}
+
+# _analysis_file_verdict <TABLE like AOD/BC_001> <trees>
+# Pure function (no I/O): what does the input file say about this table?
+# <trees> = newline-separated tree names, lowercased, without the "O2" prefix.
+# Prints exactly one verdict:
+#   PROVIDED          the table is stored in the file -> no producer needed
+#   SPAWNED           extended table (EX<base>) whose stored <base> is present:
+#                     the framework builds it in memory, no producer needed
+#   CONVERTER_NEEDED  the file only has an OLDER version of a versioned table:
+#                     the converter listed as producer really is required
+#   MC_ABSENT         an MC table, and the file has no MC trees at all: harmless
+#   MC_INPUT_UNSEEN   an MC table, the file HAS MC trees, but not this one
+#                     (or its name differs from what we derive): verify by hand
+#   UNKNOWN           the file says nothing (e.g. runtime-computed tables)
+# Name mapping (table AOD/FOO_001 -> tree O2foo_001) follows the O2 docs'
+# Troubleshooting page (missing table DF_<id>/O2v0dataext = table v0dataext).
+# The EX-prefix rule and the "any older version" rule are NOT covered by that
+# page: they are inferred from the naming seen in real output, so validate
+# them on the first real file (the summary prints the trees it found).
+_analysis_file_verdict() {
+    local TABLE="$1" TREES="$2"
+    local NAME="${TABLE#AOD/}"
+    NAME="${NAME,,}"
+
+    if _analysis_tree_present "$NAME" "$TREES"; then
+        echo PROVIDED; return
+    fi
+
+    if [[ "$NAME" == ex* ]]; then
+        local BASE="${NAME#ex}"
+        if _analysis_tree_present "$BASE" "$TREES"; then
+            echo SPAWNED; return
+        fi
+        NAME="$BASE"     # judge the extended table through its base table
+    fi
+
+    if [[ "$NAME" =~ ^(.+)_[0-9]{3}$ ]]; then
+        local OLD="${BASH_REMATCH[1]}"
+        if _analysis_tree_present "$OLD" "$TREES" || grep -qE "^${OLD}_[0-9]{3}$" <<< "$TREES"; then
+            echo CONVERTER_NEEDED; return
+        fi
+    fi
+
+    if [[ "$NAME" == mc* ]]; then
+        if grep -q '^mc' <<< "$TREES"; then
+            echo MC_INPUT_UNSEEN
+        else
+            echo MC_ABSENT
+        fi
+        return
+    fi
+
+    echo UNKNOWN
+}
+
 # ==============================================================================
-# _analysis_check_deps
-# 'o2 analysis --check-deps <analysis>'
+# _analysis_check_deps <analysis> [<production>]
+# 'o2 analysis --check-deps <analysis> [<production>]'
 #
 # Best-effort dependency check for a workflow's config_tasks.sh: sources the
 # file and calls MakeScriptO2() for real (reflecting the DOO2_* switches as
@@ -730,7 +884,7 @@ EOF
 # ==============================================================================
 _analysis_check_deps() {
     local ANALYSIS="$1"
-    [ -z "$ANALYSIS" ] && { log_error "usage: o2 analysis --check-deps <analysis>"; return 1; }
+    local PRODUCTION="${2:-}"
 
     local TASKS_FILE="$O2_LOCAL_DIR/analysis/$ANALYSIS/config_tasks.sh"
     [ -f "$TASKS_FILE" ] || { log_error "$TASKS_FILE not found"; return 1; }
@@ -755,56 +909,329 @@ _analysis_check_deps() {
     printf '    %s\n' "${CHAIN[@]}"
 
     load_apptainer
-    local MISSING=0
 
-    for TASK in "${CHAIN[@]}"; do
-        # Direct inputs of this task (backward search, level 0 — same tool
-        # and same invocation pattern as cmd_tools_deps in lib/tools.sh)
-        local OUT
-        OUT=$(_o2_container -- bash -c '
-            SCRIPT="$O2PHYSICS_ROOT/share/scripts/find_dependencies.py"
-            if [ ! -f "$SCRIPT" ]; then
-                echo "[ERROR] find_dependencies.py not found — is O2Physics built?" >&2
-                exit 1
-            fi
-            "$SCRIPT" -w "$1" 2>/dev/null
-        ' bash "$TASK") || { log_warn "[$TASK] dependency lookup failed — skipping"; continue; }
+    # Pass 1: what does each active task genuinely need, right now, given
+    # its actual configuration — not "what could any of its process
+    # functions possibly need" (which is what find_dependencies.py -w
+    # answers, and why it used to flag pidTPCFull*/RUN2BCINFO_001/etc. as
+    # gaps even though they sit behind a process switch nobody turns on).
+    #
+    # Reads each task's own dumped workflow spec directly
+    # ($O2PHYSICS_ROOT/share/dpl/<task>.json — generated by the binary
+    # itself via --dump-workflow, one file per executable). Every input
+    # carries "control:default" (always subscribed) or one or more
+    # "control:<device>/process<X>" keys (subscribed only if that process
+    # is active) — confirmed by inspecting real dumps for trackselection
+    # (control:default only, never ambiguous) and propagation-service
+    # (processRealData=1 by default, processRealDataWithPID=0 — exactly
+    # why its pidTPCFull* inputs are NOT genuinely needed by default).
+    #
+    # "Active" per process key: the matching key in dpl-config.json's
+    # section for that device if one exists (section keys are NOT
+    # guaranteed to match the device name — e.g. dpl-config.json's
+    # "track-propagation" vs. this device's real name "propagation-service"
+    # — so an exact-name section lookup can legitimately miss; when it
+    # does, this falls back to the JSON's own defaultValue and says so,
+    # rather than silently guessing a match).
+    #
+    # Known blind spot: a plain numeric/boolean option that changes
+    # behaviour without changing any declared "control:" subscription
+    # (trackselection's "isRun3" is exactly this) is invisible here by
+    # construction — this reads what DPL will SUBSCRIBE to, not what the
+    # C++ does once it has the data. Worth a manual look at the task's
+    # .cxx if a result here still looks wrong.
+    local CFG_DIR
+    CFG_DIR="$(dirname "$TASKS_FILE")"
 
-        local -a INPUTS=()
-        mapfile -t INPUTS < <(echo "$OUT" | grep -oE "'[A-Za-z0-9_/]+'" | tr -d "'")
+    local PY_CONTROL='
+import json, sys, os
 
-        for TABLE in "${INPUTS[@]}"; do
-            # Who can produce this table?
-            local PROD
-            PROD=$(_o2_container -- bash -c '
-                "$O2PHYSICS_ROOT/share/scripts/find_dependencies.py" -t "$1" 2>/dev/null
-            ' bash "$TABLE")
+def format_table(origin, description, subspec):
+    name = origin + "/" + description
+    try:
+        n = int(subspec)
+    except Exception:
+        n = 0
+    if n > 0:
+        name += "_%03d" % n
+    return name
 
-            local -a PRODUCERS=()
-            mapfile -t PRODUCERS < <(echo "$PROD" | grep -oE "'[a-zA-Z0-9-]+'" | tr -d "'")
+def load_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
-            # No producer found -> base AOD table, nothing to chain against
-            [ "${#PRODUCERS[@]}" -eq 0 ] && continue
+def main():
+    dpl_root = os.environ.get("O2PHYSICS_ROOT", "")
+    config_path = sys.argv[1]
+    dpl_config = load_json(config_path)
 
-            local FOUND=0
-            for P in "${PRODUCERS[@]}"; do
-                for C in "${CHAIN[@]}"; do
-                    [ "$P" = "$C" ] && FOUND=1 && break 2
-                done
-            done
+    for line in sys.stdin:
+        task = line.strip()
+        if not task:
+            continue
+        print("###TASK### " + task)
+        json_path = os.path.join(dpl_root, "share", "dpl", task + ".json")
+        if not os.path.isfile(json_path):
+            print("###MISSING-JSON### " + json_path)
+            continue
+        try:
+            with open(json_path) as f:
+                spec = json.load(f)
+        except Exception as e:
+            print("###PARSE-ERROR### " + str(e))
+            continue
 
-            if [ "$FOUND" -eq 0 ]; then
-                log_warn "[$TASK] needs $TABLE ← (${PRODUCERS[*]}) — not activated in config_tasks.sh"
-                MISSING=$((MISSING + 1))
-            fi
-        done
+        wf_list = spec.get("workflow", [])
+        if not wf_list:
+            continue
+        device = wf_list[0]
+        device_name = device.get("name", "")
+        section = dpl_config.get(device_name)
+        if section is None:
+            print("###NO-CONFIG-SECTION### " + device_name)
+
+        for inp in device.get("inputs", []):
+            origin = inp.get("origin", "")
+            description = inp.get("description", "")
+            subspec = inp.get("subspec", 0)
+            table = format_table(origin, description, subspec)
+            meta = inp.get("metadata", [])
+            control_keys = []
+            for m in meta:
+                nm = str(m.get("name", ""))
+                if nm.startswith("control:"):
+                    control_keys.append(m)
+
+            if not control_keys:
+                print("###ACTIVE### " + table)
+                continue
+
+            active = False
+            for ck in control_keys:
+                cname = ck.get("name", "")
+                if cname == "control:default":
+                    active = True
+                    break
+                if "/" in cname:
+                    proc = cname.split("/", 1)[1]
+                else:
+                    proc = cname
+                if section is not None and proc in section:
+                    val = str(section[proc]).strip().lower()
+                else:
+                    val = str(ck.get("defaultValue", "0")).strip().lower()
+                if val == "1" or val == "true":
+                    active = True
+                    break
+
+            if active:
+                print("###ACTIVE### " + table)
+
+main()
+'
+
+    local TASKS_LIST
+    TASKS_LIST=$(printf '%s\n' "${CHAIN[@]}")
+
+    local RAW1
+    RAW1=$(_o2_container \
+        -B "$CFG_DIR:/analysis_cfg" \
+        -- bash -c 'python3 -c "$1" /analysis_cfg/dpl-config.json <<< "$2"' \
+        bash "$PY_CONTROL" "$TASKS_LIST" 2>&1)
+
+    local -A WF_INPUTS=()      # task -> space-separated tables it genuinely needs
+    local -A NEEDED_BY=()      # table -> space-separated task(s) that need it
+    local -a NO_CONFIG_NOTES=()
+    local ANY_LOOKUP_FAILED=0
+    local CUR=""
+    while IFS= read -r LINE; do
+        case "$LINE" in
+            "###TASK### "*)
+                CUR="${LINE#"###TASK### "}"
+                WF_INPUTS["$CUR"]=""
+                ;;
+            "###MISSING-JSON### "*)
+                log_warn "[$CUR] no dumped workflow spec found: ${LINE#"###MISSING-JSON### "} — is it built?"
+                ANY_LOOKUP_FAILED=1
+                ;;
+            "###PARSE-ERROR### "*)
+                log_warn "[$CUR] could not parse its workflow spec: ${LINE#"###PARSE-ERROR### "}"
+                ANY_LOOKUP_FAILED=1
+                ;;
+            "###NO-CONFIG-SECTION### "*)
+                NO_CONFIG_NOTES+=("$CUR (device '${LINE#"###NO-CONFIG-SECTION### "}')")
+                ;;
+            "###ACTIVE### "*)
+                local T="${LINE#"###ACTIVE### "}"
+                WF_INPUTS["$CUR"]+="$T "
+                NEEDED_BY["$T"]+="$CUR "
+                ;;
+        esac
+    done <<< "$RAW1"
+
+    if [ "${#NO_CONFIG_NOTES[@]}" -gt 0 ]; then
+        log_info "No matching dpl-config.json section (using the task's own JSON defaults):"
+        printf '    %s\n' "${NO_CONFIG_NOTES[@]}"
+    fi
+
+    if [ "${#NEEDED_BY[@]}" -eq 0 ]; then
+        if [ "$ANY_LOOKUP_FAILED" -eq 1 ]; then
+            log_error "check-deps: no table could be resolved — see warning(s) above"
+            return 1
+        fi
+        log_info "check-deps: no input tables resolved — nothing to check"
+        return 0
+    fi
+
+    local TABLES_LIST
+    TABLES_LIST=$(printf '%s\n' "${!NEEDED_BY[@]}")
+
+    local RAW2
+    RAW2=$(_o2_container -- bash -c '
+        SCRIPT="$O2PHYSICS_ROOT/share/scripts/find_dependencies.py"
+        while IFS= read -r TABLE; do
+            [ -z "$TABLE" ] && continue
+            echo "###TABLE### $TABLE"
+            "$SCRIPT" -t "$TABLE" 2>&1
+        done <<< "$1"
+    ' bash "$TABLES_LIST" 2>&1)
+
+    local -A TABLE_PRODUCERS=()
+    CUR=""
+    while IFS= read -r LINE; do
+        if [[ "$LINE" == "###TABLE### "* ]]; then
+            CUR="${LINE#"###TABLE### "}"
+            TABLE_PRODUCERS["$CUR"]=""
+        elif [ -n "$CUR" ]; then
+            TABLE_PRODUCERS["$CUR"]+="$LINE"$'\n'
+        fi
+    done <<< "$RAW2"
+
+    # Resolve each raw producer-lookup block into a plain list of names now,
+    # so the rest of the function works with simple space-separated strings
+    # (as WF_INPUTS/NEEDED_BY already do) instead of raw tool output.
+    local -A PRODUCERS_OF=()
+    local T
+    for T in "${!TABLE_PRODUCERS[@]}"; do
+        local -a P=()
+        mapfile -t P < <(echo "${TABLE_PRODUCERS[$T]}" | grep -oE "'[a-zA-Z0-9-]+'" | tr -d "'")
+        PRODUCERS_OF["$T"]="${P[*]}"
     done
 
-    if [ "$MISSING" -eq 0 ]; then
-        log_info "check-deps: chain looks complete for every table find_dependencies.py could resolve"
-        log_info "(best-effort — does not arbitrate between multiple valid producers)"
-    else
-        log_error "check-deps: $MISSING unmet dependency(ies) — see warnings above"
-        return 1
+    # Optional: check a real input file to settle cases find_dependencies.py
+    # cannot — it only knows the static producer graph, not what a specific
+    # AO2D file actually contains (an old vs. new table version, or whether
+    # MC-only trees exist at all in this file). Local cache first, one
+    # sample download as a fallback.
+    local TREES=""
+    if [ -n "$PRODUCTION" ] && [ "${#NEEDED_BY[@]}" -gt 0 ]; then
+        local SAMPLE_HOST=""
+        if SAMPLE_HOST=$(_analysis_find_local_ao2d "$PRODUCTION"); then
+            log_info "Input file (cached locally): $SAMPLE_HOST"
+        else
+            log_info "No local AO2D found for $PRODUCTION — downloading one sample file"
+            log_info "(first file found; it stays in the data cache for later runs)"
+            SAMPLE_HOST=$(_analysis_fetch_sample_ao2d "$PRODUCTION") || {
+                log_warn "Could not obtain a sample AO2D — checking without it"
+                SAMPLE_HOST=""
+            }
+        fi
+        if [ -n "$SAMPLE_HOST" ]; then
+            local TREE_RAW
+            TREE_RAW=$(_analysis_list_trees "$SAMPLE_HOST") || true
+            if ! echo "$TREE_RAW" | grep -q '^###\(TREE\|ERROR\)###'; then
+                log_warn "Unexpected answer while reading the input file (last lines):"
+                echo "$TREE_RAW" | tail -3 | sed 's/^/    /'
+            elif echo "$TREE_RAW" | grep -q '^###ERROR###'; then
+                log_warn "Could not read the input file: $(echo "$TREE_RAW" | grep '^###ERROR###' | head -1 | sed 's/^###ERROR### //')"
+            else
+                TREES=$(echo "$TREE_RAW" | grep '^###TREE### ' | sed 's/^###TREE### //' \
+                        | sed -E 's/^O2//' | tr 'A-Z' 'a-z')
+                if [ -z "$TREES" ]; then
+                    log_warn "The input file lists no trees — checking without it"
+                else
+                    log_info "Checked against $(echo "$TREE_RAW" | grep '^###DF###' | head -1 | sed 's/^###DF### //'): $(echo "$TREES" | wc -l) trees"
+                    log_info "(ONE file only: a production mixing reconstruction passes may differ)"
+                fi
+            fi
+        fi
     fi
+
+    # Group by TABLE, not by missing producer: a table with two alternative
+    # producers (e.g. an old vs. a new converter) is only a real gap if
+    # NEITHER is active — grouping by producer would otherwise tell you to
+    # activate both, which are mutually exclusive.
+    local -a GAP_TABLES=()
+    local P C
+    for T in "${!NEEDED_BY[@]}"; do
+        local -a PRODUCERS=()
+        read -ra PRODUCERS <<< "${PRODUCERS_OF[$T]:-}"
+        [ "${#PRODUCERS[@]}" -eq 0 ] && continue   # base AOD table, no producer needed at all
+        local SATISFIED=0
+        for P in "${PRODUCERS[@]}"; do
+            for C in "${CHAIN[@]}"; do [ "$P" = "$C" ] && SATISFIED=1 && break 2; done
+        done
+        [ "$SATISFIED" -eq 0 ] && GAP_TABLES+=("$T")
+    done
+
+    if [ "${#GAP_TABLES[@]}" -eq 0 ] && [ "$ANY_LOOKUP_FAILED" -eq 0 ]; then
+        log_info "check-deps: chain is complete — every table your active tasks need"
+        log_info "directly has a producer also active (direct needs only — does not"
+        log_info "follow what a candidate producer would itself need in turn)"
+        return 0
+    fi
+
+    echo
+    local ANY_REAL_GAP=0
+    local -a SORTED_GAPS=()
+    mapfile -t SORTED_GAPS < <(printf '%s\n' "${GAP_TABLES[@]}" | sort)
+
+    for T in "${SORTED_GAPS[@]}"; do
+        local VERDICT=""
+        [ -n "$TREES" ] && VERDICT=$(_analysis_file_verdict "$T" "$TREES")
+        case "$VERDICT" in
+            PROVIDED|SPAWNED) continue ;;   # already covered by the input file: not a gap
+            MC_ABSENT)        continue ;;   # MC-only table, no MC in this file: harmless
+        esac
+        ANY_REAL_GAP=1
+
+        local -a CANDIDATES=()
+        mapfile -t CANDIDATES < <(printf '%s\n' ${PRODUCERS_OF[$T]} | sort)
+
+        local NOTE=""
+        case "$VERDICT" in
+            CONVERTER_NEEDED) NOTE=" — confirmed: your input file only has an OLDER version of this table" ;;
+            MC_INPUT_UNSEEN)  NOTE=" — your input file has MC trees, but not this exact one: verify by hand" ;;
+            "")
+                if [[ "$T" =~ _[0-9]{3}$ ]]; then
+                    NOTE=" — versioned table: whether you need this depends on your input format (pass a <production> to check)"
+                fi
+                ;;
+        esac
+
+        log_error "$T$NOTE"
+        echo "    needed by: ${NEEDED_BY[$T]}"
+        if [ "${#CANDIDATES[@]}" -eq 1 ]; then
+            echo "    FIX: activate ${CANDIDATES[0]} in config_tasks.sh"
+        else
+            echo "    FIX: activate ONE of (not both): ${CANDIDATES[*]}"
+        fi
+        echo
+    done
+
+    if [ "$ANY_LOOKUP_FAILED" -eq 1 ]; then
+        log_warn "check-deps: one or more tasks could not be looked up — see warnings above"
+    fi
+
+    if [ "$ANY_REAL_GAP" -eq 0 ]; then
+        log_info "check-deps: no action needed — every candidate producer above was ruled out"
+        log_info "by your input file (already-satisfied table, or no MC content)"
+        return 0
+    fi
+
+    log_error "check-deps: dependency gap(s) found — see FIX line(s) above"
+    return 1
 }

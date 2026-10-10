@@ -14,6 +14,8 @@
 #   O2_PARALLEL_STREAMS  number of parallel alien.py cp streams (default 4)
 #   O2_RETRY_DOWNLOADS   1 = skip the grid scan, only retry files listed in
 #                        each group's failed.txt (local mode only)
+#   O2_SAMPLE_ONLY       1 = download ONE AO2D.root into /data and print
+#                        SAMPLE_FILE=<path>; no groups are written
 #   ALICE_CERN_USER  CERN username for alien-token-init
 #
 # Bind mounts (set by lib/run.sh):
@@ -72,93 +74,6 @@ echo "========================================"
 echo ""
 
 # ------------------------------------------------------------------------------
-# Initialize ALICE Grid token (non-interactive)
-# ------------------------------------------------------------------------------
-echo "[INFO] Initializing ALICE Grid token..."
-alien-token-init "$ALICE_CERN_USER" 2>/dev/null || \
-    echo "[WARNING] alien-token-init failed — trying with existing token"
-
-if ! alien.py pwd &>/dev/null; then
-    echo "[ERROR] Cannot connect to ALICE Grid"
-    exit 1
-fi
-echo "[INFO] Grid connection OK"
-echo ""
-
-if [ "${O2_RETRY_DOWNLOADS:-0}" = "1" ]; then
-    _retry_failed_downloads
-    exit 0
-fi
-
-# ------------------------------------------------------------------------------
-# Build list of runs
-# ------------------------------------------------------------------------------
-if [ "$RUNS" = "all" ]; then
-    echo "[INFO] Scanning runs under $GRID_PRODUCTION_PATH ..."
-    RUN_LIST=$(alien.py ls "$GRID_PRODUCTION_PATH/" 2>/dev/null \
-        | grep -oP '\d{6,9}' | sort -u || true)
-    [ -z "$RUN_LIST" ] && { echo "[ERROR] No runs found"; exit 1; }
-    echo "[INFO] Found $(echo "$RUN_LIST" | wc -l) run(s)"
-else
-    RUN_LIST=$(echo "$RUNS" | tr ',' '\n' | tr -d ' ' | sort -u)
-    echo "[INFO] Requested $(echo "$RUN_LIST" | wc -l) run(s)"
-fi
-
-# ------------------------------------------------------------------------------
-# Find all AO2D.root files
-# ------------------------------------------------------------------------------
-ALL_FILES_TMP=$(mktemp)
-
-while IFS= read -r RUN; do
-    [ -z "$RUN" ] && continue
-
-    if [ "$DATA_TYPE" = "data" ]; then
-        RUN_PATH="$GRID_PRODUCTION_PATH/$(printf '%09d' "$RUN")"
-    else
-        RUN_PATH="$GRID_PRODUCTION_PATH/0/$RUN"
-    fi
-
-    echo "[INFO] Scanning run $RUN ..."
-    RUN_FILES=$(alien.py find "$RUN_PATH" -select AO2D.root 2>/dev/null || true)
-
-    if [ -z "$RUN_FILES" ]; then
-        echo "[WARNING] No AO2D.root found for run $RUN — skipping"
-        continue
-    fi
-
-    N_RUN=$(echo "$RUN_FILES" | wc -l)
-    echo "[INFO]   Found $N_RUN file(s)"
-
-    if [ "$MAX_FILES" -gt 0 ] && [ "$N_RUN" -gt "$MAX_FILES" ]; then
-        RUN_FILES=$(echo "$RUN_FILES" | head -n "$MAX_FILES")
-        echo "[INFO]   Limited to $MAX_FILES file(s)"
-    fi
-
-    echo "$RUN_FILES" >> "$ALL_FILES_TMP"
-done <<< "$RUN_LIST"
-
-# Remove blank lines
-grep -v '^$' "$ALL_FILES_TMP" > "${ALL_FILES_TMP}.clean" \
-    && mv "${ALL_FILES_TMP}.clean" "$ALL_FILES_TMP"
-
-TOTAL_FILES=$(wc -l < "$ALL_FILES_TMP")
-if [ "$TOTAL_FILES" -eq 0 ]; then
-    echo "[ERROR] No AO2D.root files found"
-    rm -f "$ALL_FILES_TMP"
-    exit 1
-fi
-echo ""
-echo "[INFO] Total files found: $TOTAL_FILES"
-
-# ------------------------------------------------------------------------------
-# Split into groups and write filelists
-# Bug fix: use temp files instead of subshells for counters
-# ------------------------------------------------------------------------------
-GROUP_NUM=0
-FILE_NUM=0
-GROUP_TMP=$(mktemp)
-
-# ------------------------------------------------------------------------------
 # _download_one <grid_path> <local_container_path>
 # Single-file download used both during the initial scan and by
 # _retry_failed_downloads(). Returns 0 on success (file present locally),
@@ -177,7 +92,7 @@ _download_one() {
         -cksum \
         -retry 3 \
         "$GRID_FILE" \
-        "file://$LOCAL_FILE_CONTAINER" 2>&1; then
+        "file://$LOCAL_FILE_CONTAINER" </dev/null 2>&1; then
         return 0
     else
         echo "[FAIL] $GRID_FILE"
@@ -251,6 +166,155 @@ _retry_failed_downloads() {
     echo "========================================"
 }
 
+# ------------------------------------------------------------------------------
+# _fetch_sample_file
+# O2_SAMPLE_ONLY=1: download exactly ONE AO2D.root (the first file of the first
+# run that has any) into the shared data cache, at the same relative path a
+# normal run would use, so a later 'o2 run' reuses it instead of downloading
+# it again. Writes NO group files and NO .n_groups (unlike a normal run).
+# On success prints one machine-readable line:  SAMPLE_FILE=/data/<prod>/<rel>
+# Used by 'o2 analysis --check-deps <analysis> <production>'.
+# ------------------------------------------------------------------------------
+_fetch_sample_file() {
+    # No assumption about directory depth or naming below the production
+    # root: alien.py find recurses on its own (confirmed for data mode's
+    # apass1/0001/ layout, and it must be trusted the same way for sim
+    # mode's 0/<run>/<NNN>/ layout — pass-subdirectory numbering is not
+    # fixed and should not be guessed). A specific --runs filter narrows
+    # the search to keep it fast; "all" searches from the production root.
+    local SEARCH_PATH="$GRID_PRODUCTION_PATH"
+    local FIRST_FILE REL_PATH LOCAL_FILE_CONTAINER
+
+    if [ "$RUNS" != "all" ]; then
+        local FIRST_RUN
+        FIRST_RUN=$(echo "$RUNS" | tr ',' '\n' | tr -d ' ' | sort -u | head -n 1)
+        if [ "$DATA_TYPE" = "data" ]; then
+            SEARCH_PATH="$GRID_PRODUCTION_PATH/$(printf '%09d' "$((10#$FIRST_RUN))")"
+        else
+            SEARCH_PATH="$GRID_PRODUCTION_PATH/0/$((10#$FIRST_RUN))"
+        fi
+    fi
+
+    echo "[INFO] Searching (recursively) for one AO2D.root under $SEARCH_PATH"
+    FIRST_FILE=$(alien.py find "$SEARCH_PATH" -select AO2D.root </dev/null 2>/dev/null | head -n 1 || true)
+
+    if [ -z "$FIRST_FILE" ]; then
+        echo "[ERROR] No AO2D.root found under $SEARCH_PATH"
+        return 1
+    fi
+
+    REL_PATH="${FIRST_FILE#$GRID_PRODUCTION_PATH/}"
+    LOCAL_FILE_CONTAINER="$LOCAL_DATA_BASE/$PRODUCTION/$REL_PATH"
+
+    if [ ! -f "$LOCAL_FILE_CONTAINER" ]; then
+        echo "[INFO] Downloading one sample file: $FIRST_FILE"
+        _download_one "$FIRST_FILE" "$LOCAL_FILE_CONTAINER" || {
+            echo "[ERROR] Sample download failed"
+            return 1
+        }
+    fi
+    echo "SAMPLE_FILE=$LOCAL_FILE_CONTAINER"
+}
+
+# ------------------------------------------------------------------------------
+# Initialize ALICE Grid token (non-interactive)
+# ------------------------------------------------------------------------------
+echo "[INFO] Initializing ALICE Grid token..."
+alien-token-init "$ALICE_CERN_USER" 2>/dev/null || \
+    echo "[WARNING] alien-token-init failed — trying with existing token"
+
+if ! alien.py pwd &>/dev/null; then
+    echo "[ERROR] Cannot connect to ALICE Grid"
+    exit 1
+fi
+echo "[INFO] Grid connection OK"
+echo ""
+
+if [ "${O2_RETRY_DOWNLOADS:-0}" = "1" ]; then
+    _retry_failed_downloads
+    exit 0
+fi
+
+if [ "${O2_SAMPLE_ONLY:-0}" = "1" ]; then
+    _fetch_sample_file
+    exit $?
+fi
+
+# ------------------------------------------------------------------------------
+# Build list of runs
+# ------------------------------------------------------------------------------
+if [ "$RUNS" = "all" ]; then
+    # Sim productions nest run numbers one level below the production
+    # itself (.../LHC26d7/0/559781, not .../LHC26d7/559781) — confirmed
+    # against a real Grid listing, not the data-mode layout.
+    LS_PATH="$GRID_PRODUCTION_PATH/"
+    [ "$DATA_TYPE" = "sim" ] && LS_PATH="$GRID_PRODUCTION_PATH/0/"
+    echo "[INFO] Scanning runs under $LS_PATH ..."
+    RUN_LIST=$(alien.py ls "$LS_PATH" 2>/dev/null \
+        | grep -oP '\d{6,9}' | sort -u || true)
+    [ -z "$RUN_LIST" ] && { echo "[ERROR] No runs found under $LS_PATH"; exit 1; }
+    echo "[INFO] Found $(echo "$RUN_LIST" | wc -l) run(s)"
+else
+    RUN_LIST=$(echo "$RUNS" | tr ',' '\n' | tr -d ' ' | sort -u)
+    echo "[INFO] Requested $(echo "$RUN_LIST" | wc -l) run(s)"
+fi
+
+# ------------------------------------------------------------------------------
+# Find all AO2D.root files
+# ------------------------------------------------------------------------------
+ALL_FILES_TMP=$(mktemp)
+
+while IFS= read -r RUN; do
+    [ -z "$RUN" ] && continue
+
+    if [ "$DATA_TYPE" = "data" ]; then
+        # 10#: run names from 'alien.py ls' are zero-padded (000544116);
+        # without forcing base 10, bash reads them as octal.
+        RUN_PATH="$GRID_PRODUCTION_PATH/$(printf '%09d' "$((10#$RUN))")"
+    else
+        RUN_PATH="$GRID_PRODUCTION_PATH/0/$((10#$RUN))"
+    fi
+
+    echo "[INFO] Scanning run $RUN ..."
+    RUN_FILES=$(alien.py find "$RUN_PATH" -select AO2D.root </dev/null 2>/dev/null || true)
+
+    if [ -z "$RUN_FILES" ]; then
+        echo "[WARNING] No AO2D.root found for run $RUN — skipping"
+        continue
+    fi
+
+    N_RUN=$(echo "$RUN_FILES" | wc -l)
+    echo "[INFO]   Found $N_RUN file(s)"
+
+    if [ "$MAX_FILES" -gt 0 ] && [ "$N_RUN" -gt "$MAX_FILES" ]; then
+        RUN_FILES=$(echo "$RUN_FILES" | head -n "$MAX_FILES")
+        echo "[INFO]   Limited to $MAX_FILES file(s)"
+    fi
+
+    echo "$RUN_FILES" >> "$ALL_FILES_TMP"
+done <<< "$RUN_LIST"
+
+# Remove blank lines
+grep -v '^$' "$ALL_FILES_TMP" > "${ALL_FILES_TMP}.clean" \
+    && mv "${ALL_FILES_TMP}.clean" "$ALL_FILES_TMP"
+
+TOTAL_FILES=$(wc -l < "$ALL_FILES_TMP")
+if [ "$TOTAL_FILES" -eq 0 ]; then
+    echo "[ERROR] No AO2D.root files found"
+    rm -f "$ALL_FILES_TMP"
+    exit 1
+fi
+echo ""
+echo "[INFO] Total files found: $TOTAL_FILES"
+
+# ------------------------------------------------------------------------------
+# Split into groups and write filelists
+# Bug fix: use temp files instead of subshells for counters
+# ------------------------------------------------------------------------------
+GROUP_NUM=0
+FILE_NUM=0
+GROUP_TMP=$(mktemp)
+
 _write_group() {
     local GNUM="$1"
     local GROUP_FILE="$2"   # temp file with list of grid paths for this group
@@ -305,8 +369,12 @@ _write_group() {
         [ -s "$FAILED_FILE" ] || rm -f "$FAILED_FILE"
 
         echo "[INFO] $GROUP_TAG: $N_FILES file(s) — downloaded=$DOWNLOADED skipped=$SKIPPED failed=$FAILED"
-        [ "$FAILED" -gt 0 ] && \
+        # 'if', not '[ ... ] && echo': as the last statement of a function, a
+        # false '&&' list makes the function return 1, and under 'set -e' that
+        # would terminate the whole script after the first group.
+        if [ "$FAILED" -gt 0 ]; then
             echo "[WARNING] $FAILED download(s) failed in $GROUP_TAG — recorded in $FAILED_FILE, retry with O2_RETRY_DOWNLOADS=1"
+        fi
     fi
 }
 

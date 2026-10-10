@@ -215,6 +215,24 @@ _o2_container() {
 }
 
 # ==============================================================================
+# _check_grid_token
+# Pre-flight check before touching the Grid (fresh file resolution,
+# --retry-downloads, or a sample download for 'o2 analysis --check-deps'):
+# fails fast with a clear message instead of letting get_aod.sh discover an
+# expired token file-by-file — or, worse, after an --hpc job has already
+# queued on OAR. Same check as 'o2 status proxy'.
+# Lives here (not in lib/run.sh) because o2.sh only sources the library of
+# the requested subcommand: analysis.sh must be able to call it too.
+# ==============================================================================
+_check_grid_token() {
+    if _o2_container -- bash -c 'alien.py pwd' >/dev/null 2>&1; then
+        return 0
+    fi
+    log_error "ALICE Grid token invalid or expired — run 'o2 status proxy --renew' first"
+    return 1
+}
+
+# ==============================================================================
 # _o2_container_raw
 # Run a command inside the container WITHOUT loading O2Physics.
 # Use for commands that run before O2Physics is built (aliBuild, ninja).
