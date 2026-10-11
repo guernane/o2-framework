@@ -1,5 +1,10 @@
 #!/bin/bash
 # lib/list.sh - List existing data, outputs, and builds
+#
+# The listing helpers (_clean_list_*_local, _clean_print_active_versions) are
+# shared with 'o2 clean' and live in clean.sh. Source it here so this module
+# is self-contained instead of relying on whoever sourced it first.
+source "${SCRIPTS_DIR:?SCRIPTS_DIR is not set}/lib/clean.sh"
 
 cmd_list() {
     local CATEGORY="${1:-}"
@@ -42,6 +47,10 @@ o2 list [data|outputs|builds] (--local|--remote|--both)
 
 Shows what exists in each category (size, last modified), without
 deleting anything. See 'o2 clean' to remove items.
+
+For builds, the last column marks the build 'latest' points to (ACTIVE)
+and the worktree(s) each build belongs to, e.g. "[dev]" or "[master]".
+The build name is what 'o2 shell --tag' expects.
 
 Examples:
   o2 list --both

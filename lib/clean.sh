@@ -76,6 +76,12 @@ _clean_list_outputs_local() {
         done | sort -r
 }
 
+# Lists every real install directory "<gitref>-local<N>": "dev-local<N>" for
+# the dev branch, "<10-hex-hash>-local<N>" for detached-HEAD worktrees (master,
+# PRs) — see _build_record_tag in build.sh. The marker column carries
+# "ACTIVE" (target of the moving "latest" pointer) and/or "[worktree,...]"
+# (worktrees whose recorded build tag in analysis.json is this directory), so
+# the names to pass to 'o2 shell --tag' / 'o2 build --use' are visible.
 _clean_list_builds_local() {
     local O2DIR="$O2_LOCAL_DIR/sw/slc9_x86-64/O2Physics"
     [ -d "$O2DIR" ] || return
@@ -83,12 +89,37 @@ _clean_list_builds_local() {
     _clean_print_active_versions
 
     local ACTIVE
-    ACTIVE="$(readlink -f "$O2DIR/latest" 2>/dev/null || readlink -f "$O2DIR/latest-dev-o2" 2>/dev/null)"
-    find "$O2DIR" -mindepth 1 -maxdepth 1 -type d -name "dev-local*" 2>/dev/null \
+    ACTIVE="$(_clean_active_build_path)"
+
+    # tag -> worktree name(s), from the registry written by 'o2 build'
+    local -A OWNER=()
+    local REGISTRY="$O2_LOCAL_DIR/analysis/analysis.json"
+    if [ -f "$REGISTRY" ]; then
+        local T N
+        while read -r T N; do
+            [ -n "$T" ] && OWNER["$T"]="${OWNER[$T]:+${OWNER[$T]},}$N"
+        done < <(python3 - "$REGISTRY" 2>/dev/null << 'PYEOF'
+import sys, json
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+for name, entry in data.get("worktrees", {}).items():
+    if entry.get("tag"):
+        print(entry["tag"], name)
+PYEOF
+)
+    fi
+
+    find "$O2DIR" -mindepth 1 -maxdepth 1 -type d -name "*-local*" 2>/dev/null \
         | while read -r d; do
-            local MARK=""
-            [ "$(readlink -f "$d")" = "$ACTIVE" ] && MARK="ACTIVE"
-            printf "%s\t%s\t%s\t%s\t%s\n" "$(date -r "$d" '+%Y-%m-%d %H:%M')" "$(du -sh "$d" 2>/dev/null | cut -f1)" "$(basename "$d")" "$d" "$MARK"
+            local NAME MARK=""
+            NAME="$(basename "$d")"
+            if [ -n "$ACTIVE" ] && [ "$(readlink -f "$d")" = "$ACTIVE" ]; then
+                MARK="ACTIVE"
+            fi
+            if [ -n "${OWNER[$NAME]:-}" ]; then
+                MARK="${MARK:+$MARK }[${OWNER[$NAME]}]"
+            fi
+            printf "%s\t%s\t%s\t%s\t%s\n" "$(date -r "$d" '+%Y-%m-%d %H:%M')" "$(du -sh "$d" 2>/dev/null | cut -f1)" "$NAME" "$d" "$MARK"
         done | sort -r
 }
 

@@ -13,6 +13,7 @@
 #   merge      merge AnalysisResults.root files from completed groups
 #   status     monitor analyses and HPC jobs
 #   deploy     sync scripts to HPC and launch remote build
+#   shell      interactive shell (or one-off command) in the O2Physics container
 #   help       show this message or help for a specific command
 #
 # Examples:
@@ -39,6 +40,11 @@
 #   o2 deploy --sync-only
 #   o2 deploy --status
 #   o2 deploy --log
+#
+#   o2 shell
+#   o2 shell --pr proxies
+#   o2 shell --raw
+#   o2 shell -- o2-analysis-je-jet-finder-charged --help
 #
 #   o2 help build
 # ==============================================================================
@@ -109,8 +115,9 @@ _o2_help() {
         export)   source "$SCRIPTS_DIR/lib/export.sh";   _export_help; return ;;
         clean)    source "$SCRIPTS_DIR/lib/clean.sh";    _clean_help;  return ;;
         list)     source "$SCRIPTS_DIR/lib/list.sh";     _list_help;   return ;;
-	analysis) source "$SCRIPTS_DIR/lib/analysis.sh"; _analysis_help; return ;;
-        tools) _tools_help; return ;;
+        analysis) source "$SCRIPTS_DIR/lib/analysis.sh"; _analysis_help; return ;;
+        shell)    source "$SCRIPTS_DIR/lib/shell.sh";    _shell_help;  return ;;
+        tools)    _tools_help; return ;;
     esac
 
     cat << 'EOF'
@@ -122,6 +129,7 @@ Commands:
   merge    Merge AnalysisResults.root files from all completed job groups
   status   Monitor analyses, HPC jobs, and ALICE Grid token
   deploy   Sync scripts to HPC and launch a remote build
+  shell    Interactive shell (or one-off command) in the O2Physics container
   backup   Commit and push all 3 repos to GitHub (local machine only)
   export   Bundle fresh clones of all 3 repos into a shareable archive (local machine only)
   list     Show existing data / outputs / builds, local and/or remote
@@ -137,6 +145,7 @@ Quick start:
   4. Run:         o2 run proxies LHC24aj
   5. Monitor:     o2 status proxies LHC24aj
   6. Merge:       o2 merge proxies LHC24aj
+  7. Explore:     o2 shell
 
 Workflow development:
   Edit task:    ~/alice/sw/O2Physics/PWGJE/Tasks/taskProxyBuilder.cxx
@@ -170,6 +179,12 @@ case "$COMMAND" in
             exit 1
         fi
         cmd_deploy "$@"
+        ;;
+    shell)
+        # interactive container shell: local machine, or inside an OAR job
+        # (cmd_shell itself refuses the HPC login node)
+        source "$SCRIPTS_DIR/lib/shell.sh"
+        cmd_shell "$@"
         ;;
     tools)
         cmd_tools "$@"
