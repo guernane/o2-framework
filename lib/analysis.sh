@@ -27,6 +27,7 @@ cmd_analysis() {
             --check-deps)      ACTION="check-deps"; TARGET="$2"; shift 2
                                # optional <production>: a positional word, not another option
                                if [[ $# -gt 0 && "$1" != -* ]]; then ARG2="$1"; shift; fi ;;
+            --gen-config)      ACTION="gen-config"; TARGET="$2"; shift 2 ;;
             --force)           FORCE=1; shift ;;
             --help|-h)         _analysis_help  ; return ;;
             *) log_error "Unknown option: $1" ; _analysis_help ; return 1 ;;
@@ -53,6 +54,7 @@ cmd_analysis() {
         register)   _analysis_register_task "$REGISTRY" "$TARGET" "$ARG2" "$ARG3" ;;
         promote)    _analysis_promote     "$REGISTRY" "$TARGET" "$FORCE" ;;
         check-deps) _analysis_check_deps "$TARGET" "$ARG2" ;;
+        gen-config) _analysis_gen_config "$TARGET" ;;
         *)          _analysis_list        "$REGISTRY" ;;
     esac
 }
@@ -862,6 +864,86 @@ _analysis_file_verdict() {
 }
 
 # ==============================================================================
+# _analysis_gen_config <analysis>
+# 'o2 analysis --gen-config <analysis>'
+#
+# Overwrites analysis/<analysis>/dpl-config.json with a fresh dump straight
+# from the binaries, instead of trusting whatever is currently committed.
+#
+# Why this exists: comparing a real fresh dump against the committed
+# analysis/test/dpl-config.json showed its section names (e.g.
+# "trackselection", "track-propagation") don't match any real device name
+# in the current build at all (real names: "track-selection",
+# "propagation-service") — a silent, total mismatch, not a partial one.
+# That means no section in that file was actually being read by DPL; the
+# pipeline was running on compiled-in defaults the whole time, coincidentally.
+#
+# How the dump happens (confirmed empirically in this conversation, not
+# from documentation): running a task's executable with no
+# --configuration flag writes a fresh dpl-config.json to the CURRENT
+# WORKING DIRECTORY immediately — before any event is processed, no AOD
+# file required. This strips any "--configuration json://..." MakeScriptO2()
+# added and runs the resulting pipe under a timeout in a scratch directory,
+# then moves whatever dpl-config.json appeared into place.
+#
+# NOT verified against a real multi-task piped chain in this session (only
+# a single task was tested by hand) — the timeout value and whether a
+# multi-device pipe behaves the same way as a single executable are both
+# unconfirmed. Check the output of a first real run of this command
+# carefully before trusting it blindly.
+#
+# Deliberately overwrites, no diff against the old file: the old file has
+# already been shown unreliable, so there is nothing trustworthy to merge
+# against. If you had hand-tuned values in the old file, they are gone
+# after this runs — re-apply them to the new file yourself if still needed.
+# ==============================================================================
+_analysis_gen_config() {
+    local ANALYSIS="$1"
+    [ -z "$ANALYSIS" ] && { log_error "usage: o2 analysis --gen-config <analysis>"; return 1; }
+
+    local WF_DIR="$O2_LOCAL_DIR/analysis/$ANALYSIS"
+    local TASKS_FILE="$WF_DIR/config_tasks.sh"
+    [ -f "$TASKS_FILE" ] || { log_error "$TASKS_FILE not found"; return 1; }
+
+    local PIPE_OUTPUT
+    PIPE_OUTPUT=$(source "$TASKS_FILE"; MakeScriptO2 2>/dev/null) \
+        || { log_error "MakeScriptO2() failed in $TASKS_FILE"; return 1; }
+
+    # Strip any --configuration json://... flag so DPL falls back to its
+    # own compiled-in defaults and dumps them fresh, instead of reading
+    # (and perpetuating) whatever is already on disk.
+    local PIPE_NO_CFG
+    PIPE_NO_CFG=$(echo "$PIPE_OUTPUT" | sed -E 's#--configuration json://[^[:space:]]*##g')
+
+    load_apptainer
+    local WORK_DIR
+    WORK_DIR=$(mktemp -d)
+
+    log_step "Generating a fresh dpl-config.json for '$ANALYSIS' (no AOD file, compiled-in defaults)"
+
+    _o2_container \
+        -B "$WORK_DIR:/genconfig" \
+        -- bash -c "cd /genconfig && timeout 20 bash -c '$PIPE_NO_CFG'" \
+        2>&1 | tail -30
+
+    if [ ! -f "$WORK_DIR/dpl-config.json" ]; then
+        log_error "gen-config: no dpl-config.json was produced — see the output above"
+        log_error "(the pipe may need a real --aod-file to get far enough to dump; untested here)"
+        rm -rf "$WORK_DIR"
+        return 1
+    fi
+
+    local DEST="$WF_DIR/dpl-config.json"
+    cp "$WORK_DIR/dpl-config.json" "$DEST"
+    rm -rf "$WORK_DIR"
+
+    log_info "gen-config: wrote $DEST"
+    log_info "Sections now in this file:"
+    grep -oE '^    "[^"]+":' "$DEST" | sed 's/^    "/    /; s/":$//'
+    log_warn "Any hand-tuned values from the previous file are gone — re-apply by hand if still needed"
+}
+
+# ==============================================================================
 # _analysis_check_deps <analysis> [<production>]
 # 'o2 analysis --check-deps <analysis> [<production>]'
 #
@@ -942,6 +1024,7 @@ _analysis_check_deps() {
     # .cxx if a result here still looks wrong.
     local CFG_DIR
     CFG_DIR="$(dirname "$TASKS_FILE")"
+    log_info "Using dpl-config.json: $CFG_DIR/dpl-config.json (run 'o2 analysis --gen-config $ANALYSIS' if unsure it's current)"
 
     local PY_CONTROL='
 import json, sys, os
