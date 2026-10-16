@@ -1665,12 +1665,13 @@ main()
     fi
 
     if [ "$ANY_REAL_GAP" -eq 0 ]; then
-        log_info "check-deps: no action needed — every candidate producer above was ruled out"
-        log_info "by your input file (already-satisfied table, or no MC content)"
         if [ "$FILE_GAPS" -gt 0 ]; then
+            log_info "producer check: no producer is missing in the chain (every candidate was ruled out by the input file)"
             log_error "check-deps: FAILED — the input file lacks table(s) the chain reads from it (see above)"
             return 1
         fi
+        log_info "check-deps: no action needed — every candidate producer above was ruled out"
+        log_info "by your input file (already-satisfied table, or no MC content)"
         return 0
     fi
 
