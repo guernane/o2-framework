@@ -27,7 +27,9 @@ cmd_analysis() {
             --check-deps)      ACTION="check-deps"; TARGET="$2"; shift 2
                                # optional <production>: a positional word, not another option
                                if [[ $# -gt 0 && "$1" != -* ]]; then ARG2="$1"; shift; fi ;;
-            --gen-config)      ACTION="gen-config"; TARGET="$2"; shift 2 ;;
+            --gen-config)      ACTION="gen-config"; TARGET="$2"; shift 2
+                               # <production>: a positional word, not another option
+                               if [[ $# -gt 0 && "$1" != -* ]]; then ARG2="$1"; shift; fi ;;
             --force)           FORCE=1; shift ;;
             --help|-h)         _analysis_help  ; return ;;
             *) log_error "Unknown option: $1" ; _analysis_help ; return 1 ;;
@@ -54,7 +56,7 @@ cmd_analysis() {
         register)   _analysis_register_task "$REGISTRY" "$TARGET" "$ARG2" "$ARG3" ;;
         promote)    _analysis_promote     "$REGISTRY" "$TARGET" "$FORCE" ;;
         check-deps) _analysis_check_deps "$TARGET" "$ARG2" ;;
-        gen-config) _analysis_gen_config "$TARGET" ;;
+        gen-config) _analysis_gen_config "$TARGET" "$ARG2" ;;
         *)          _analysis_list        "$REGISTRY" ;;
     esac
 }
@@ -680,6 +682,17 @@ Options:
                                 tables stored in the AO2D itself are checked
                                 against a real input file: a cached one, else
                                 ONE sample file is downloaded to the data cache.
+                                It also checks that EVERY table the chain reads
+                                from the file (asked by a task, produced by no
+                                other active task) is in that file, with its
+                                exact version (e.g. a legacy converter asking
+                                for TRACKEXTRA v0 on a file that only has v2).
+  --gen-config <analysis> <production>
+                                regenerate analysis/<analysis>/dpl-config.json:
+                                runs the active task chain on ONE real AO2D of
+                                <production> (a cached one, else one sample file
+                                is downloaded) and keeps the configuration DPL
+                                dumps when it exits. OVERWRITES the file.
   --help                       show this help
 
 Target formats (for --enable/--disable):
@@ -707,6 +720,7 @@ Examples:
   o2 analysis --disable  test/testTask.cxx
   o2 analysis --check-deps proxies
   o2 analysis --check-deps proxies LHC24aj
+  o2 analysis --gen-config test LHC25f3
 
 After enabling tasks, rebuild with:
   o2 build --rebuild-tasks
@@ -804,6 +818,47 @@ except Exception as e:
         -- bash -c 'python3 -c "$1" "$2"' bash "$PY" "$CONT_FILE" 2>&1
 }
 
+# _analysis_file_need <TABLE like AOD/TRACKEXTRA_002> <trees>
+# Pure function (no I/O): is a table the chain READS from the input file really
+# in it, with this exact version? <trees> as for _analysis_file_verdict.
+# Present  -> prints nothing, returns 0.
+# Missing  -> prints ONE line "<KIND>|<trees of this table found in the file>"
+#             and returns 1. KIND is
+#   NEWER  the file only has newer version(s): a task asks for an older one
+#   OLDER  the file only has older version(s): a converter must produce it
+#   OTHER  the file has other versions, some older and some newer
+#   NONE   the file has no version of this table at all
+_analysis_file_need() {
+    local TABLE="$1" TREES="$2"
+    local NAME="${TABLE#*/}"
+    NAME="${NAME,,}"
+    _analysis_tree_present "$NAME" "$TREES" && return 0
+
+    local BASE="${NAME%_[0-9][0-9][0-9]}"
+    local NEED=0
+    if [[ "$NAME" =~ _([0-9]{3})$ ]]; then NEED=$((10#${BASH_REMATCH[1]})); fi
+
+    local FOUND
+    FOUND=$(grep -E "^${BASE}(_[0-9]{3})?$" <<< "$TREES" | tr '\n' ' ')
+    FOUND="${FOUND% }"
+    if [ -z "$FOUND" ]; then
+        echo "NONE|"
+        return 1
+    fi
+
+    local T V NEWER=0 OLDER=0
+    for T in $FOUND; do
+        V=0
+        if [[ "$T" =~ _([0-9]{3})$ ]]; then V=$((10#${BASH_REMATCH[1]})); fi
+        if [ "$V" -gt "$NEED" ]; then NEWER=1; else OLDER=1; fi
+    done
+    if   [ "$NEWER" -eq 1 ] && [ "$OLDER" -eq 0 ]; then echo "NEWER|$FOUND"
+    elif [ "$OLDER" -eq 1 ] && [ "$NEWER" -eq 0 ]; then echo "OLDER|$FOUND"
+    else echo "OTHER|$FOUND"
+    fi
+    return 1
+}
+
 # _analysis_tree_present <lowercase-name> <newline-separated trees>
 _analysis_tree_present() {
     grep -qxF -- "$1" <<< "$2"
@@ -864,8 +919,8 @@ _analysis_file_verdict() {
 }
 
 # ==============================================================================
-# _analysis_gen_config <analysis>
-# 'o2 analysis --gen-config <analysis>'
+# _analysis_gen_config <analysis> <production>
+# 'o2 analysis --gen-config <analysis> <production>'
 #
 # Overwrites analysis/<analysis>/dpl-config.json with a fresh dump straight
 # from the binaries, instead of trusting whatever is currently committed.
@@ -878,19 +933,33 @@ _analysis_file_verdict() {
 # That means no section in that file was actually being read by DPL; the
 # pipeline was running on compiled-in defaults the whole time, coincidentally.
 #
-# How the dump happens (confirmed empirically in this conversation, not
-# from documentation): running a task's executable with no
-# --configuration flag writes a fresh dpl-config.json to the CURRENT
-# WORKING DIRECTORY immediately — before any event is processed, no AOD
-# file required. This strips any "--configuration json://..." MakeScriptO2()
-# added and runs the resulting pipe under a timeout in a scratch directory,
-# then moves whatever dpl-config.json appeared into place.
+# How the dump happens (from reading O2's Framework/Core/src/
+# runDataProcessing.cxx, not yet confirmed by a run here): the DPL DRIVER
+# writes dpl-config.json to its CURRENT WORKING DIRECTORY when it reaches
+# its EXIT state, from the "[CONFIG] key=value" lines the devices reported
+# while starting. So the devices must really start and the driver must exit
+# cleanly (a SIGTERM from 'timeout' is fine, SIGKILL is not). Starting the
+# devices needs a real input: with no --aod-file the AOD reader device stops
+# with "No input file defined!", and an empty '@list' makes the metadata
+# discovery abort with: Couldn't open file "". Hence the <production>
+# argument: this finds (or downloads ONE sample of) an AO2D.root of that
+# production, replaces the --aod-file argument by it, strips any
+# "--configuration json://..." MakeScriptO2() added, and runs the pipe under
+# a timeout in a scratch directory, then moves the dpl-config.json that
+# appeared into place.
 #
-# NOT verified against a real multi-task piped chain in this session (only
-# a single task was tested by hand) — the timeout value and whether a
-# multi-device pipe behaves the same way as a single executable are both
-# unconfirmed. Check the output of a first real run of this command
-# carefully before trusting it blindly.
+# The AO2D's metadata (data/MC, anchor, reco pass) can change what services
+# auto-configure, so the production you pick is the one the defaults are
+# dumped for. The dump also records the sample file in the
+# internal-dpl-aod-reader section (aod-file-private); that key is removed
+# from the result (see the comment before PY_STRIP below), because a device
+# with a JSON section reads its options from the JSON, so a leftover value
+# would override the --aod-file of every later 'o2 run'.
+#
+# NOT verified against a real multi-task piped chain: the timeout
+# (O2_GENCONFIG_TIMEOUT, default 120 s) and whether the driver dumps when
+# the timeout cuts the run short are unconfirmed. Check the output of a
+# first real run of this command before trusting it blindly.
 #
 # Deliberately overwrites, no diff against the old file: the old file has
 # already been shown unreliable, so there is nothing trustworthy to merge
@@ -899,7 +968,14 @@ _analysis_file_verdict() {
 # ==============================================================================
 _analysis_gen_config() {
     local ANALYSIS="$1"
-    [ -z "$ANALYSIS" ] && { log_error "usage: o2 analysis --gen-config <analysis>"; return 1; }
+    local PRODUCTION="${2:-}"
+    [ -z "$ANALYSIS" ] && { log_error "usage: o2 analysis --gen-config <analysis> <production>"; return 1; }
+    if [ -z "$PRODUCTION" ]; then
+        log_error "gen-config: a <production> is required (DPL needs a real AO2D to start)"
+        log_error "usage: o2 analysis --gen-config $ANALYSIS <production>"
+        [ -d "$DATA_BASE" ] && log_info "Productions in $DATA_BASE: $(ls "$DATA_BASE" 2>/dev/null | tr '\n' ' ')"
+        return 1
+    fi
 
     local WF_DIR="$O2_LOCAL_DIR/analysis/$ANALYSIS"
     local TASKS_FILE="$WF_DIR/config_tasks.sh"
@@ -909,28 +985,83 @@ _analysis_gen_config() {
     PIPE_OUTPUT=$(source "$TASKS_FILE"; MakeScriptO2 2>/dev/null) \
         || { log_error "MakeScriptO2() failed in $TASKS_FILE"; return 1; }
 
+    # One real AO2D of this production: a cached one, else download ONE
+    # sample into the shared data cache (same helpers as --check-deps).
+    local SAMPLE_HOST=""
+    if SAMPLE_HOST=$(_analysis_find_local_ao2d "$PRODUCTION"); then
+        log_info "Input file (cached locally): $SAMPLE_HOST"
+    else
+        log_info "No local AO2D found for $PRODUCTION — downloading one sample file"
+        SAMPLE_HOST=$(_analysis_fetch_sample_ao2d "$PRODUCTION") || {
+            log_error "gen-config: could not obtain a sample AO2D for $PRODUCTION"
+            return 1
+        }
+    fi
+    local CONT_FILE="/data/${SAMPLE_HOST#$DATA_BASE/}"
+
     # Strip any --configuration json://... flag so DPL falls back to its
     # own compiled-in defaults and dumps them fresh, instead of reading
-    # (and perpetuating) whatever is already on disk.
-    local PIPE_NO_CFG
-    PIPE_NO_CFG=$(echo "$PIPE_OUTPUT" | sed -E 's#--configuration json://[^[:space:]]*##g')
+    # (and perpetuating) whatever is already on disk. Also replace the
+    # --aod-file argument (an '@${FILELIST}' that is unset here, hence the
+    # old 'Couldn't open file ""') by the real sample file.
+    local PIPE_RUN
+    PIPE_RUN=$(echo "$PIPE_OUTPUT" | sed -E \
+        -e 's#--configuration json://[^[:space:]]*##g' \
+        -e "s#--aod-file[[:space:]]+[^[:space:]]+#--aod-file ${CONT_FILE}#")
 
     load_apptainer
     local WORK_DIR
     WORK_DIR=$(mktemp -d)
 
-    log_step "Generating a fresh dpl-config.json for '$ANALYSIS' (no AOD file, compiled-in defaults)"
+    log_step "Generating a fresh dpl-config.json for '$ANALYSIS' (compiled-in defaults, input: $PRODUCTION)"
 
+    # Full output goes to a log file (the screen only shows the tail), so a
+    # device that exits with an error can be diagnosed afterwards.
+    local GEN_LOG="${LOG_DIR:-$O2_LOCAL_DIR/logs}/gen-config-$ANALYSIS.log"
+    mkdir -p "$(dirname "$GEN_LOG")"
+
+    # The pipe is passed as a positional argument ($2), not spliced inside
+    # quotes, so a quote in it cannot break the command.
     _o2_container \
         -B "$WORK_DIR:/genconfig" \
-        -- bash -c "cd /genconfig && timeout 20 bash -c '$PIPE_NO_CFG'" \
-        2>&1 | tail -30
+        -B "$DATA_BASE:/data" \
+        -- bash -c 'cd /genconfig && timeout "$1" bash -c "$2"' \
+        bash "${O2_GENCONFIG_TIMEOUT:-120}" "$PIPE_RUN" \
+        2>&1 | tee "$GEN_LOG" | tail -30
+    log_info "gen-config: full output in $GEN_LOG"
 
     if [ ! -f "$WORK_DIR/dpl-config.json" ]; then
         log_error "gen-config: no dpl-config.json was produced — see the output above"
-        log_error "(the pipe may need a real --aod-file to get far enough to dump; untested here)"
+        log_error "(the driver only dumps on a clean exit; try a longer O2_GENCONFIG_TIMEOUT)"
         rm -rf "$WORK_DIR"
         return 1
+    fi
+
+    # The dump records the sample input in the reader's section
+    # (internal-dpl-aod-reader / aod-file-private). When a device has a JSON
+    # section, DPL reads its options from that JSON on top of the compiled-in
+    # defaults, and the default of aod-file-private is the --aod-file given
+    # on the command line. A leftover value here would therefore make every
+    # 'o2 run' read this sample file instead of its own filelist. Dropping the
+    # key restores the default. Done with the container's python3 (same
+    # pattern as --check-deps); the file is rewritten with 4-space indent.
+    local PY_STRIP='
+import json, sys
+p = sys.argv[1]
+with open(p) as f:
+    d = json.load(f)
+r = d.get("internal-dpl-aod-reader")
+if isinstance(r, dict):
+    r.pop("aod-file-private", None)
+with open(p, "w") as f:
+    json.dump(d, f, indent=4)
+    f.write("\n")
+'
+    if _o2_container -B "$WORK_DIR:/genconfig" \
+        -- bash -c 'python3 -c "$1" /genconfig/dpl-config.json' bash "$PY_STRIP" 2>&1; then
+        log_info "gen-config: removed the sample input (aod-file-private) from the reader section"
+    else
+        log_warn "gen-config: could not strip aod-file-private — delete that line by hand before committing"
     fi
 
     local DEST="$WF_DIR/dpl-config.json"
@@ -940,6 +1071,8 @@ _analysis_gen_config() {
     log_info "gen-config: wrote $DEST"
     log_info "Sections now in this file:"
     grep -oE '^    "[^"]+":' "$DEST" | sed 's/^    "/    /; s/":$//'
+    grep -q '"aod-file-private"' "$DEST" && \
+        log_warn "aod-file-private is still in the file — delete it before committing"
     log_warn "Any hand-tuned values from the previous file are gone — re-apply by hand if still needed"
 }
 
@@ -1116,6 +1249,157 @@ def main():
 main()
 '
 
+    # Second pass (only used when a <production> is given): which tables does
+    # the chain READ FROM THE INPUT FILE? Same rules as DPL itself, taken from
+    # Framework/Core/src/WorkflowHelpers.cxx (injectServiceDevices):
+    #   - an AOD-origin input is read from the file unless another active task
+    #     produces exactly that table (same origin/description/version);
+    #   - an input carrying "projectors" is an EXTENDED table (EXTRACK...): DPL
+    #     spawns it, unless a task produces it, from the base table(s) named by
+    #     its "input:<name>" metadata, and THOSE are read from the file;
+    #   - "index-records" (index tables) and "ccdb:" inputs are not file tables;
+    #   - an input with lifetime Optional (7) is not required;
+    #   - an input is only requested when its "control:" switch is on (same
+    #     rule as the first pass).
+    # Every device of every executable is read (an executable can hold several
+    # devices, e.g. tracks-extra-converter + tracks-extra-spawner). The table
+    # version is the subspec: AOD/TRACKEXTRA subspec 2 = tree O2trackextra_002.
+    # Output markers: ###FILE-NEED### <table><TAB><who>  ###NOTE###  ###SKIPPED###
+    local PY_FILEREQ='
+import json, os, sys
+
+AOD_ORIGINS = ("AOD", "AOD1", "AOD2", "EMB", "AMD")
+OPTIONAL = 7
+
+def fmt(origin, description, subspec):
+    name = origin + "/" + description
+    try:
+        n = int(subspec)
+    except Exception:
+        n = 0
+    if n > 0:
+        name += "_%03d" % n
+    return name
+
+def kind(item):
+    names = [str(m.get("name", "")) for m in item.get("metadata", [])]
+    if "projectors" in names:
+        return "DYN"
+    if "index-records" in names:
+        return "IDX"
+    if any(n.startswith("ccdb:") for n in names):
+        return "TIM"
+    return "PLAIN"
+
+def is_active(inp, section):
+    ctl = [m for m in inp.get("metadata", []) if str(m.get("name", "")).startswith("control:")]
+    if not ctl:
+        return True
+    for ck in ctl:
+        cname = str(ck.get("name", ""))
+        if cname == "control:default":
+            return True
+        proc = cname.split("/", 1)[1] if "/" in cname else cname
+        if section is not None and proc in section:
+            val = str(section[proc]).strip().lower()
+        else:
+            val = str(ck.get("defaultValue", "0")).strip().lower()
+        if val in ("1", "true"):
+            return True
+    return False
+
+def base_of(value):
+    parts = str(value).split("/")
+    if len(parts) != 4:
+        return None
+    return fmt(parts[1], parts[2], parts[3])
+
+def main():
+    dpl_root = os.environ.get("O2PHYSICS_ROOT", "")
+    try:
+        with open(sys.argv[1]) as f:
+            config = json.load(f)
+    except Exception:
+        config = {}
+    needs = {}
+    req_dyn = []
+    prov_aod = set()
+    prov_dyn = set()
+    idx = set()
+    for line in sys.stdin:
+        exe = line.strip()
+        if not exe:
+            continue
+        path = os.path.join(dpl_root, "share", "dpl", exe + ".json")
+        try:
+            with open(path) as f:
+                spec = json.load(f)
+        except Exception as e:
+            print("###SKIPPED### " + exe + ": " + str(e))
+            continue
+        for dev in spec.get("workflow", []):
+            dname = dev.get("name", "")
+            who = exe + " [" + dname + "]"
+            section = config.get(dname)
+            for inp in dev.get("inputs", []):
+                origin = inp.get("origin", "")
+                table = fmt(origin, inp.get("description", ""), inp.get("subspec", 0))
+                try:
+                    if int(inp.get("lifetime", 0)) == OPTIONAL:
+                        continue
+                except Exception:
+                    pass
+                if not is_active(inp, section):
+                    continue
+                k = kind(inp)
+                if k == "PLAIN":
+                    if origin in AOD_ORIGINS:
+                        needs.setdefault(table, {}).setdefault(who, [False, set()])[0] = True
+                elif k == "DYN":
+                    bases = []
+                    for m in inp.get("metadata", []):
+                        if str(m.get("name", "")).startswith("input:"):
+                            b = base_of(m.get("defaultValue", ""))
+                            if b:
+                                bases.append(b)
+                    req_dyn.append((table, who, bases))
+                elif k == "IDX":
+                    idx.add(table)
+            for out in dev.get("outputs", []):
+                origin = out.get("origin", "")
+                if origin not in AOD_ORIGINS:
+                    continue
+                table = fmt(origin, out.get("description", ""), out.get("subspec", 0))
+                k = kind(out)
+                if k == "PLAIN":
+                    prov_aod.add(table)
+                elif k == "DYN":
+                    prov_dyn.add(table)
+    for table, who, bases in req_dyn:
+        if table in prov_dyn:
+            continue
+        for b in bases:
+            needs.setdefault(b, {}).setdefault(who, [False, set()])[1].add(table)
+    for table in sorted(needs):
+        if table in prov_aod:
+            continue
+        parts = []
+        for who in sorted(needs[table]):
+            direct, vias = needs[table][who]
+            vias = sorted(vias)
+            if direct and vias:
+                parts.append(who + " (also through " + ", ".join(vias) + ")")
+            elif vias:
+                parts.append(who + " (through " + ", ".join(vias) + ")")
+            else:
+                parts.append(who)
+        print("###FILE-NEED### " + table + "\t" + "; ".join(parts))
+    if idx:
+        print("###NOTE### " + str(len(idx)) + " index table(s) are built from other tables and were not expanded")
+
+main()
+'
+
     local TASKS_LIST
     TASKS_LIST=$(printf '%s\n' "${CHAIN[@]}")
 
@@ -1243,6 +1527,72 @@ main()
         fi
     fi
 
+    # Second pass: every table the chain reads from the input file must be in
+    # it, with its exact version. This is independent of the producer check
+    # below, which cannot see this problem: a table nobody produces is assumed
+    # to come from the file, without ever asking the file.
+    local -i FILE_GAPS=0
+    if [ -n "$TREES" ]; then
+        local RAW3 LINE3 FT FW NAME3 RES3 KIND3 FOUND3 NOTE3
+        local -i N_FILE_TABLES=0
+        RAW3=$(_o2_container \
+            -B "$CFG_DIR:/analysis_cfg" \
+            -- bash -c 'python3 -c "$1" /analysis_cfg/dpl-config.json <<< "$2"' \
+            bash "$PY_FILEREQ" "$TASKS_LIST" 2>&1)
+
+        echo
+        while IFS= read -r LINE3; do
+            case "$LINE3" in
+                "###SKIPPED### "*)
+                    log_warn "file check: skipped ${LINE3#"###SKIPPED### "}"
+                    ;;
+                "###NOTE### "*)
+                    log_info "file check: ${LINE3#"###NOTE### "}"
+                    ;;
+                "###FILE-NEED### "*)
+                    LINE3="${LINE3#"###FILE-NEED### "}"
+                    FT="${LINE3%%$'\t'*}"
+                    FW="${LINE3#*$'\t'}"
+                    N_FILE_TABLES+=1
+                    if RES3=$(_analysis_file_need "$FT" "$TREES"); then
+                        continue
+                    fi
+                    KIND3="${RES3%%|*}"
+                    FOUND3="${RES3#*|}"
+                    NAME3="${FT#*/}"
+                    NAME3="${NAME3,,}"
+                    case "$KIND3" in
+                        NEWER) NOTE3="the file only has a NEWER version ($FOUND3): a task asks for an older one — typically a legacy converter or an outdated task" ;;
+                        OLDER) NOTE3="the file only has an OLDER version ($FOUND3): a converter producing the version needed must be active" ;;
+                        OTHER) NOTE3="the file has other version(s) of it ($FOUND3), none matching" ;;
+                        *)     NOTE3="the file has no version of this table, and no active task produces it" ;;
+                    esac
+                    FILE_GAPS+=1
+                    log_error "$FT: read from the input file, but tree O2${NAME3} is NOT in it"
+                    echo "    $NOTE3"
+                    echo "    needed by: $FW"
+                    case "$KIND3" in
+                        NEWER) echo "    FIX: deactivate the task(s) above in config_tasks.sh for this production" ;;
+                        OLDER) echo "    FIX: activate a converter that produces exactly this version (the one listed is not enough), or use a production whose files contain it" ;;
+                        *)     echo "    FIX: deactivate the task(s) above for this production, or use a production whose files contain this table" ;;
+                    esac
+                    echo
+                    ;;
+            esac
+        done <<< "$RAW3"
+
+        if [ "$N_FILE_TABLES" -eq 0 ]; then
+            log_warn "file check: could not work out which tables the chain reads from the file — output:"
+            echo "$RAW3" | tail -5 | sed 's/^/    /'
+        elif [ "$FILE_GAPS" -eq 0 ]; then
+            log_info "check-deps: all $N_FILE_TABLES table(s) the chain reads from the input file are present, with the exact version"
+        else
+            log_error "check-deps: $FILE_GAPS of $N_FILE_TABLES table(s) the chain reads from the input file are MISSING from it"
+        fi
+    elif [ -z "$PRODUCTION" ]; then
+        log_info "(give a <production> to also check the tables the chain reads from the input file)"
+    fi
+
     # Group by TABLE, not by missing producer: a table with two alternative
     # producers (e.g. an old vs. a new converter) is only a real gap if
     # NEITHER is active — grouping by producer would otherwise tell you to
@@ -1261,6 +1611,11 @@ main()
     done
 
     if [ "${#GAP_TABLES[@]}" -eq 0 ] && [ "$ANY_LOOKUP_FAILED" -eq 0 ]; then
+        if [ "$FILE_GAPS" -gt 0 ]; then
+            log_info "producer check: no producer is missing in the chain (direct needs only)"
+            log_error "check-deps: FAILED — the input file lacks table(s) the chain reads from it (see above)"
+            return 1
+        fi
         log_info "check-deps: chain is complete — every table your active tasks need"
         log_info "directly has a producer also active (direct needs only — does not"
         log_info "follow what a candidate producer would itself need in turn)"
@@ -1312,6 +1667,10 @@ main()
     if [ "$ANY_REAL_GAP" -eq 0 ]; then
         log_info "check-deps: no action needed — every candidate producer above was ruled out"
         log_info "by your input file (already-satisfied table, or no MC content)"
+        if [ "$FILE_GAPS" -gt 0 ]; then
+            log_error "check-deps: FAILED — the input file lacks table(s) the chain reads from it (see above)"
+            return 1
+        fi
         return 0
     fi
 
