@@ -264,6 +264,10 @@ _github_api() {
     local METHOD="$1"
     local ENDPOINT="$2"
     local DATA="${3:-}"
+    if [ -z "${O2_GITHUB_TOKEN:-}" ]; then
+        log_error "GitHub token not found — put a fine-grained token (Contents r/w, Metadata r) in ~/.o2_github_token (chmod 600)"
+        return 1
+    fi
     local ARGS=(
         -s
         -H "Authorization: token $O2_GITHUB_TOKEN"
@@ -291,6 +295,13 @@ _git_setup_fork() {
     if [ -d "$O2PHYSICS_SRC/.git" ]; then
         log_info "O2Physics already cloned at $O2PHYSICS_SRC"
         return
+    fi
+
+    # The GitHub API calls below need the token: stop here with a clear
+    # message instead of failing later as "fork not ready after 60s".
+    if [ -z "${O2_GITHUB_TOKEN:-}" ]; then
+        log_error "GitHub token not found — put a fine-grained token (Contents r/w, Metadata r) in ~/.o2_github_token (chmod 600)"
+        exit 1
     fi
 
     # Create fork on GitHub if needed

@@ -13,8 +13,8 @@
 #   o2 status <workflow> <production> --jobs   OAR job states
 #   o2 status all                              all workflows + productions
 #   o2 status sync                             rsync bookkeeping from HPC
-#   o2 status proxy                            ALICE Grid token status
-#   o2 status proxy --renew                    renew token on HPC
+#   o2 status proxy                            Grid token status (here + HPC)
+#   o2 status proxy --renew                    renew the token (here + HPC)
 # ==============================================================================
 
 # ==============================================================================
@@ -384,29 +384,51 @@ _status_sync() {
 
 # ==============================================================================
 # _status_proxy
-# Show or renew ALICE Grid token
+# Show or renew the ALICE Grid token (this machine AND the HPC)
+#
+# alien-token-init and alien.py only exist INSIDE the O2 container (they come
+# from the alienv environment), never on the host: every call here goes
+# through _o2_container, as get_aod.sh and _check_grid_token do.
+#
+# On a workstation, BOTH tokens are handled, because both are used:
+#   - this machine : o2 run / --gen-config / --check-deps read the CCDB here
+#   - the HPC      : --hpc jobs and get_aod.sh run there
+# The HPC half is run over 'ssh -t' (the password / 2FA prompt needs a tty)
+# by re-invoking o2.sh there with O2_FORCE_HPC=1, which makes that instance
+# act on its own container instead of ssh-ing back.
 # ==============================================================================
+_status_proxy_here() {
+    local RENEW="$1"
+    if [ "$RENEW" -eq 1 ]; then
+        _o2_container -- bash -c 'alien-token-init "$1"' bash "$ALICE_CERN_USER" \
+            || { log_error "alien-token-init failed"; return 1; }
+    fi
+    if _o2_container -- bash -c 'alien.py pwd' >/dev/null 2>&1; then
+        echo "Token: valid"
+    else
+        echo "Token: expired or not initialized"
+        return 1
+    fi
+}
+
 _status_proxy() {
     local RENEW="${1:-0}"
+    local RC=0
+    local VERB="status"
+    [ "$RENEW" -eq 1 ] && VERB="renew"
 
-    if [ "$RENEW" -eq 1 ]; then
-        log_info "Renewing ALICE Grid token..."
-        if _is_local_machine; then
-            ssh "${O2_HPC_USER}@${O2_HPC_HOST}" \
-                "alien-token-init ${ALICE_CERN_USER}"
-        else
-            alien-token-init "$ALICE_CERN_USER"
-        fi
-        return
-    fi
-
-    log_info "ALICE Grid token status:"
     if _is_local_machine; then
-        ssh "${O2_HPC_USER}@${O2_HPC_HOST}" \
-            "alien.py pwd 2>/dev/null && echo 'Token: valid' \
-             || echo 'Token: expired or not initialized'"
+        log_info "ALICE Grid token ($VERB) — this machine:"
+        _status_proxy_here "$RENEW" || RC=1
+
+        log_info "ALICE Grid token ($VERB) — HPC ${O2_HPC_HOST}:"
+        local REMOTE_ARGS="status proxy"
+        [ "$RENEW" -eq 1 ] && REMOTE_ARGS="status proxy --renew"
+        ssh -t "${O2_HPC_USER}@${O2_HPC_HOST}" \
+            "O2_FORCE_HPC=1 ${O2_HPC_HOME_DIR}/o2.sh ${REMOTE_ARGS}" || RC=1
     else
-        alien.py pwd 2>/dev/null && echo "Token: valid" \
-            || echo "Token: expired or not initialized"
+        log_info "ALICE Grid token ($VERB):"
+        _status_proxy_here "$RENEW" || RC=1
     fi
+    return "$RC"
 }

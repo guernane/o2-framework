@@ -86,11 +86,12 @@ O2_LOCAL_DIR="$HOME/alice"
 # Create at: GitHub → Settings → Developer settings → Fine-grained tokens
 # ------------------------------------------------------------------------------
 O2_GITHUB_USER="guernane"
-O2_GITHUB_TOKEN=""
-GITHUB_TOKEN=$(cat ~/.o2_github_token 2>/dev/null) || {
-  echo "ERROR: GitHub token not found in ~/.o2_github_token" >&2
-  exit 1
-}
+# Read from ~/.o2_github_token (workstation only, chmod 600). ONE line on purpose:
+# lib/deploy.sh blanks every line starting with "O2_GITHUB_TOKEN=" in the config
+# it ships to the HPC. Never fatal here (every o2 command sources this file,
+# including on the HPC, where the file does not exist): the presence check is
+# in _github_api (lib/build.sh), where the token is actually used.
+O2_GITHUB_TOKEN=$(cat ~/.o2_github_token 2>/dev/null || true)
 O2_DEV_BRANCH="dev"
 O2_PHYSICS_COMPONENTS="PWGJE/Tasks"
 
