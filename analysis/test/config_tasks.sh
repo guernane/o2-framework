@@ -35,8 +35,7 @@ DOO2_EVENT_SELECTION=1            # o2-analysis-event-selection-service
 DOO2_MULTIPLICITY_TABLE=0         # o2-analysis-multiplicity-table
 DOO2_TRACK_EXTENSION=0            # o2-analysis-trackextension
 DOO2_TRACK_TO_COLLISION=1         # o2-analysis-track-to-collision-associator
-DOO2_TRACK_EXTRA_CONVERTER=1 # o2-analysis-tracks-extra-converter
-DOO2_PROPAGATION_SERVICE=1        # o2-analysis-propagationservice
+DOO2_TRACK_EXTRA_CONVERTER=0      # o2-analysis-tracks-extra-converter
 DOO2_TRACK_SELECTION=1            # o2-analysis-trackselection
 
 # Jet framework
@@ -77,8 +76,7 @@ MakeScriptO2() {
     [ "${DOO2_MULTCENTTABLE:-0}"              -eq 1 ] && WORKFLOWS+=" o2-analysis-multcenttable"
     [ "${DOO2_FT0_CORRECTED:-0}"              -eq 1 ] && WORKFLOWS+=" o2-analysis-ft0-corrected-table"
     [ "${DOO2_TRACKQA:-0}"                    -eq 1 ] && WORKFLOWS+=" o2-analysis-trackqa"
-    [ "${DOO2_TRACK_EXTRA_CONVERTER:-0}" -eq 1 ] && WORKFLOWS+=" o2-analysis-tracks-extra-converter"
-    [ "${DOO2_PROPAGATION_SERVICE:-0}"        -eq 1 ] && WORKFLOWS+=" o2-analysis-propagationservice"
+    [ "${DOO2_TRACK_EXTRA_CONVERTER:-0}"      -eq 1 ] && WORKFLOWS+=" o2-analysis-tracks-extra-converter"
     [ "${DOO2_USER_TEST_TASK:-0}"             -eq 1 ] && WORKFLOWS+=" o2-analysis-je-test-task"
 
     WORKFLOWS="${WORKFLOWS# }"

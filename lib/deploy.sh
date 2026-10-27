@@ -145,12 +145,26 @@ _deploy_sync() {
         fi
     done
 
+    # analysis/<wf>/output and analysis/<wf>/bookkeeping are per-run artefacts
+    # (see .gitignore), never part of the analysis source. They must NOT be
+    # pushed to the cluster:
+    #   - output/ : on the cluster, $HOME/alice/analysis/<wf>/output is a
+    #     symlink to the scratch (created by _resolve_workflow_paths). Without
+    #     this exclusion rsync would fill the small HOME quota with local run
+    #     output and could replace that symlink by a real directory.
+    #   - bookkeeping/ : the cluster writes the job fragments (<prod>.d/); a
+    #     stale local copy would overwrite more recent ones.
+    # The patterns are anchored at the transfer root (leading "/"), so only
+    # analysis/<wf>/output and analysis/<wf>/bookkeeping are matched. There is
+    # no --delete here, and excluded paths are never deleted on the receiver.
     if [ "${#SOURCES[@]}" -gt 0 ]; then
         rsync -avz --checksum \
             --exclude='*~' \
             --exclude='*.swp' \
             --exclude='*.bak' \
             --exclude='.git' \
+            --exclude='/analysis/*/output' \
+            --exclude='/analysis/*/bookkeeping' \
             "${SOURCES[@]}" \
             "${HPC_LOGIN}:${O2_HPC_HOME_DIR}/"
     fi

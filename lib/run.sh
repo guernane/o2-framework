@@ -550,13 +550,30 @@ _run_hpc() {
         exit 1
     }
 
-    # WORKFLOW_OUTPUT resolves under $SCRATCH on the cluster (see
-    # _resolve_workflow_paths in common.sh: SCRATCH_ANALYSES uses $SCRATCH,
-    # not $O2_HPC_HOME_DIR — only WORKFLOW_DIR/config files live under HOME,
-    # with a symlink pointing to the scratch output). $SCRATCH resolves to
-    # $O2_HPC_SCRATCH_DIR whenever that variable is set in o2_config.sh.
-    local REMOTE_OUTPUT="${WORKFLOW_OUTPUT/#$O2_LOCAL_DIR/$O2_HPC_SCRATCH_DIR}"
+    # Remote path of the bundle. Built explicitly, NOT by string substitution
+    # on the local WORKFLOW_OUTPUT: that substitution silently does nothing if
+    # the local prefix differs from O2_LOCAL_DIR (symlinked ~/alice, realpath'd
+    # WORKFLOW_OUTPUT...), which would make rsync --delete target the wrong
+    # directory on the cluster. This is exactly what _resolve_workflow_paths
+    # computes on the cluster side: $SCRATCH/analysis/<wf>/output/<prod>, with
+    # $SCRATCH = $O2_HPC_SCRATCH_DIR (checked non-empty above).
+    local REMOTE_OUTPUT="${O2_HPC_SCRATCH_DIR}/analysis/${WF_NAME}/output/${PROD}"
     local REMOTE_HOST="${O2_HPC_USER}@${O2_HPC_HOST}"
+
+    # Alien mode: the jobs need a valid Grid token ON THE CLUSTER. Fail now,
+    # before anything is sent or submitted, rather than inside every job.
+    # (_check_grid_token only tests this machine, which is a different token.)
+    # Set O2_SKIP_HPC_TOKEN_CHECK=1 to bypass, e.g. if the login node cannot
+    # run the container and this check always fails.
+    if [ "$O2_DATA_MODE" = "alien" ] && [ "${O2_SKIP_HPC_TOKEN_CHECK:-0}" -ne 1 ]; then
+        log_info "Checking ALICE Grid token on ${O2_HPC_HOST}..."
+        if ! ssh "$REMOTE_HOST" "O2_FORCE_HPC=1 ${O2_HPC_HOME_DIR}/o2.sh status proxy" >/dev/null 2>&1; then
+            log_error "ALICE Grid token invalid or expired on ${O2_HPC_HOST} (or not checkable from the login node)"
+            log_error "Renew it with: o2 status proxy --renew"
+            log_error "To skip this check: O2_SKIP_HPC_TOKEN_CHECK=1 o2 run ... --hpc"
+            exit 1
+        fi
+    fi
 
     log_sep
     log_info "Syncing workflow bundle to HPC..."
@@ -568,7 +585,40 @@ _run_hpc() {
         exit 1
     }
 
-    rsync -a --delete "$WORKFLOW_OUTPUT/" "${REMOTE_HOST}:${REMOTE_OUTPUT}/" || {
+    # The remote output/<prod>/ directory holds BOTH the bundle sent from here
+    # (dpl-config.json, .hooks.sh, .n_groups, group_NNN/filelist.txt,
+    # failed.txt, ...) AND the job results written on the cluster
+    # (group_NNN/AnalysisResults.root, AO2D.root, merge/).
+    #
+    #   fresh run : full --delete, as before. A leftover AnalysisResults.root
+    #               must not pass for a valid result (_run_workflow tests
+    #               -f AnalysisResults.root to decide whether a group is done).
+    #   --resume  : the job results must survive. Rules are first-match-wins:
+    #               the filelists are still sent (needed by --retry-downloads
+    #               followed by --resume), everything else inside group_*/ and
+    #               merge/ is excluded, hence protected from --delete (no
+    #               --delete-excluded).
+    local RSYNC_ARGS=(-a --delete)
+    if [ "$RESUME" -eq 1 ]; then
+        RSYNC_ARGS+=(
+            --include='group_*/'
+            --include='group_*/filelist.txt'
+            --include='group_*/failed.txt'
+            --exclude='group_*/*'
+            --exclude='/merge'
+        )
+        log_info "Resume mode: job results on the cluster (group_*/, merge/) are preserved"
+    else
+        # Visibility only: a fresh run wipes the previous results.
+        local N_OLD
+        N_OLD=$(ssh "$REMOTE_HOST" "ls -d '${REMOTE_OUTPUT}'/group_*/AnalysisResults.root 2>/dev/null | wc -l" 2>/dev/null || echo 0)
+        if [ "${N_OLD:-0}" -gt 0 ] 2>/dev/null; then
+            log_warn "Fresh run: $N_OLD existing AnalysisResults.root on the cluster will be DELETED"
+            log_warn "(use --resume to keep them; the scratch is not backed up)"
+        fi
+    fi
+
+    rsync "${RSYNC_ARGS[@]}" "$WORKFLOW_OUTPUT/" "${REMOTE_HOST}:${REMOTE_OUTPUT}/" || {
         log_error "rsync of workflow bundle failed"
         exit 1
     }
@@ -637,7 +687,17 @@ _submit_oar_jobs() {
         exit 1
     }
 
-    local OAR_CORES="${O2_OAR_CORES:-$(nproc)}"
+    # Resources per group job. NEVER derive the core count from nproc here:
+    # this code runs on the login node, whose CPU count says nothing about the
+    # compute nodes the jobs will land on. Either an explicit O2_OAR_CORES
+    # (o2_config.sh), or a whole node when it is empty.
+    local OAR_RESOURCES
+    if [ -n "${O2_OAR_CORES:-}" ]; then
+        OAR_RESOURCES="/nodes=1/core=${O2_OAR_CORES}"
+    else
+        OAR_RESOURCES="/nodes=1"
+    fi
+    log_info "OAR resources per group: ${OAR_RESOURCES}, walltime=${O2_OAR_WALLTIME}"
     local OAR_FLAGS="--project ${O2_OAR_PROJECT}"
     [ -n "${O2_OAR_TYPE:-}"       ] && OAR_FLAGS="$OAR_FLAGS -t ${O2_OAR_TYPE}"
     [ "${O2_OAR_DEVEL:-0}" -eq 1 ] && OAR_FLAGS="$OAR_FLAGS -t devel"
@@ -661,7 +721,7 @@ _submit_oar_jobs() {
         cat > "$OAR_SCRIPT" << OAREOF
 #!/bin/bash
 #OAR -n O2_${WF_NAME}_${PROD}_${GROUP_TAG}
-#OAR -l /nodes=1/core=${OAR_CORES},walltime=${O2_OAR_WALLTIME}
+#OAR -l ${OAR_RESOURCES},walltime=${O2_OAR_WALLTIME}
 #OAR --stdout $LOG_DIR/oar_${WF_NAME}_${PROD}_${GROUP_TAG}.log
 #OAR --stderr $LOG_DIR/oar_${WF_NAME}_${PROD}_${GROUP_TAG}.err
 #OAR --notify mail:${O2_EMAIL}
@@ -682,8 +742,16 @@ OAREOF
         _update_group_bookkeeping "$WF_NAME" "$PROD" "$GROUP_TAG" "pending" "$JOB_ID"
     done
 
-    # Submit merge job — depends on ALL analysis jobs
-    # OAR dependency syntax: one -a flag per dependency job
+    # Submit merge job — depends on the analysis jobs submitted in THIS call
+    # (after --resume: only the re-submitted groups; groups skipped as "done"
+    # were completed by an earlier call).
+    # OAR dependency syntax: one -a flag per dependency job.
+    #
+    # Known limitation (OAR docs; to be confirmed on dahu): if a group job
+    # fails, the merge job may stay "Waiting" instead of running. In that case
+    # delete it (oardel <merge job id>), fix the failed group(s) with
+    # 'o2 run <wf> <prod> --hpc --resume', or merge by hand with
+    # 'o2 merge <wf> <prod>'.
     if [ "${#JOB_IDS[@]}" -gt 0 ]; then
         local DEP_FLAGS=""
         for JID in "${JOB_IDS[@]}"; do
@@ -711,6 +779,8 @@ OAREOF
             | grep -oP 'OAR_JOB_ID=\K[0-9]+')
 
         log_info "Submitted merge → OAR job $MERGE_JOB_ID"
+        log_info "Note: the merge starts only after the group jobs end; if a group fails it may stay Waiting"
+        log_info "      (then: oardel $MERGE_JOB_ID, --resume the failed groups, or run 'o2 merge $WF_NAME $PROD')"
     fi
 
     echo ""

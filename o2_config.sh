@@ -130,6 +130,8 @@ ALICE_CERN_USER="guernane"
 # ------------------------------------------------------------------------------
 O2_OAR_PROJECT="pr-alice_hic_btagging"
 O2_OAR_WALLTIME="06:00:00"
+# Cores per group job. Empty = a whole node (/nodes=1). Never inferred from the
+# login node. Set e.g. O2_OAR_CORES=16 to request a fixed number of cores.
 O2_OAR_CORES=""
 O2_OAR_TYPE=""  # set to a valid OAR 3 job type if needed (e.g. besteffort, deploy)
 O2_OAR_DEVEL=0
