@@ -117,6 +117,7 @@ _o2_help() {
         list)     source "$SCRIPTS_DIR/lib/list.sh";     _list_help;   return ;;
         analysis) source "$SCRIPTS_DIR/lib/analysis.sh"; _analysis_help; return ;;
         shell)    source "$SCRIPTS_DIR/lib/shell.sh";    _shell_help;  return ;;
+        docs)     source "$SCRIPTS_DIR/lib/docs.sh";     _docs_help;   return ;;
         tools)    _tools_help; return ;;
     esac
 
@@ -132,6 +133,7 @@ Commands:
   shell    Interactive shell (or one-off command) in the O2Physics container
   backup   Commit and push all 3 repos to GitHub (local machine only)
   export   Bundle fresh clones of all 3 repos into a shareable archive (local machine only)
+  docs     Assemble the O2 analysis-framework documentation into one markdown file (local machine only)
   list     Show existing data / outputs / builds, local and/or remote
   clean    Remove old data
   tools    Run ALICE O2 toolkit (lint, format, diag, ...), run outputs, or O2Physics dev-builds, local and/or remote
@@ -224,6 +226,15 @@ case "$COMMAND" in
         fi
         source "$SCRIPTS_DIR/lib/export.sh"
         cmd_export "$@"
+        ;;
+    docs)
+        # docs must run on local machine only
+        if [ "$ENV_TYPE" != "local" ]; then
+            log_error "o2 docs must be run from your local machine"
+            exit 1
+        fi
+        source "$SCRIPTS_DIR/lib/docs.sh"
+        cmd_docs "$@"
         ;;
     submit-remote)
         # internal: invoked over SSH by 'o2 run --hpc', never by hand

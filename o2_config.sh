@@ -126,6 +126,21 @@ O2_GROUP_SIZE=10        # AO2D files per OAR job group
 ALICE_CERN_USER="guernane"
 
 # ------------------------------------------------------------------------------
+# Documentation (o2 docs — local machine only)
+# Builds one markdown file from the ALICE O2 analysis-framework documentation.
+# ------------------------------------------------------------------------------
+O2_DOCS_REPO="https://github.com/AliceO2Group/analysis-framework.git"
+# Cache of the light clone (src/) and default output file (alice_o2_docs.md)
+O2_DOCS_DIR="$O2_LOCAL_DIR/docs"
+# Sections of the repository's docs/ directory to concatenate, in this order.
+# 'datamodel' is ~4.5 MB of generated tables: drop it for a readable document
+# (or use: o2 docs --exclude datamodel).
+O2_DOCS_SECTIONS=(
+    gettingstarted basics-tasks basics-usage analysis-tools hyperloop
+    advanced-specifics tutorials faq tools troubleshooting datamodel glossary
+)
+
+# ------------------------------------------------------------------------------
 # OAR (HPC cluster)
 # ------------------------------------------------------------------------------
 O2_OAR_PROJECT="pr-alice_hic_btagging"
