@@ -14,6 +14,19 @@
       ]
     },
     {
+      "name": "e2e",
+      "enabled": true,
+      "status": "dev",
+      "description": "End-to-end validation (local vs cluster)",
+      "files": [
+        {
+          "path": "PWGJE/Tasks/taskE2e.cxx",
+          "dpl": "e2e-task",
+          "enabled": true
+        }
+      ]
+    },
+    {
       "name": "proxies",
       "enabled": false,
       "status": "dev",
