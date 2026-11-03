@@ -320,19 +320,34 @@ _deploy_launch() {
 
     log_info "Submitting OAR build job on $HPC_LOGIN ..."
 
-    local JOB_OUTPUT
+    # Capture stdout AND stderr, and always show them: under 'set -e' a failing
+    # command substitution would otherwise abort here, silently, hiding the
+    # very message that explains the failure.
+    local JOB_OUTPUT RC=0
     JOB_OUTPUT=$(ssh "$HPC_LOGIN" \
-        "cd $O2_HPC_HOME_DIR && $O2_HPC_HOME_DIR/o2.sh build $REMOTE_ARGS")
+        "cd $O2_HPC_HOME_DIR && $O2_HPC_HOME_DIR/o2.sh build $REMOTE_ARGS" 2>&1) || RC=$?
     echo "$JOB_OUTPUT"
+
+    if [ "$RC" -ne 0 ]; then
+        log_error "Remote build submission FAILED (exit status $RC) — no build job was submitted."
+        log_error "Read the output above, or run it by hand:"
+        log_error "  ssh $HPC_LOGIN 'cd $O2_HPC_HOME_DIR && ./o2.sh build $REMOTE_ARGS'"
+        exit 1
+    fi
 
     local JOB_ID
     JOB_ID=$(echo "$JOB_OUTPUT" \
-        | grep -oP '(?:OAR_JOB_ID=|OAR job submitted:\s*)\K[0-9]+' | tail -1)
+        | grep -oP '(?:OAR_JOB_ID=|OAR job submitted:\s*)\K[0-9]+' | tail -1 || true)
+    if [ -z "$JOB_ID" ]; then
+        log_error "The remote command ended without reporting an OAR job id — assume nothing was submitted."
+        log_error "Check: ssh $HPC_LOGIN 'oarstat -u $O2_HPC_USER'"
+        exit 1
+    fi
 
     echo ""
     log_sep
     log_info "OAR job submitted on $HPC_LOGIN"
-    log_info "Job ID  : ${JOB_ID:-unknown}"
+    log_info "Job ID  : $JOB_ID"
     log_info "Monitor : o2 deploy --status"
     log_info "Log     : o2 deploy --log"
     log_sep

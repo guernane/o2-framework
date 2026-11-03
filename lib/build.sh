@@ -1689,6 +1689,10 @@ log=$BUILD_LOG
 STATUSEOF
     log_error "Build status: FAILED (exit $BUILD_RC) — check $BUILD_LOG"
     log_error "Build status written to $STATUS_FILE"
+    # Propagate the failure: without this the function returned 0 (the status
+    # of log_error), so an OAR job whose aliBuild had died was reported as
+    # 'Terminated, exit_status_code = 0' and looked like a success.
+    return "$BUILD_RC"
 fi
 }
 
@@ -1709,20 +1713,34 @@ _build_submit_oar() {
     [ "$BUILD_ONLY"   -eq 1 ] && EXTRA_ARGS="--build-only"
 
     local OAR_SCRIPT="$LOG_DIR/oar_full_build.sh"
-    local OAR_CORES="${O2_OAR_CORES:-$(nproc)}"
+    # Resources of the build job. NEVER derive the core count from nproc here:
+    # this code runs on the login node, whose CPU count says nothing about the
+    # compute node the job will land on. Either an explicit O2_OAR_CORES
+    # (o2_config.sh), or a whole node when it is empty.
+    local OAR_RESOURCES
+    if [ -n "${O2_OAR_CORES:-}" ]; then
+        OAR_RESOURCES="/nodes=1/core=${O2_OAR_CORES}"
+    else
+        OAR_RESOURCES="/nodes=1"
+    fi
 
     cat > "$OAR_SCRIPT" << OAREOF
 #!/bin/bash
 #OAR -n O2Physics_full_build
-#OAR -l /nodes=1/core=${OAR_CORES},walltime=${O2_OAR_WALLTIME}
+#OAR -l ${OAR_RESOURCES},walltime=${O2_OAR_WALLTIME}
 #OAR --stdout $LOG_DIR/oar_full_build.log
 #OAR --stderr $LOG_DIR/oar_full_build.err
 #OAR --notify mail:${O2_EMAIL}
+
+echo "[INFO] ===== OAR job \${OAR_JOB_ID:-?} started on \$(hostname -s) at \$(date -u +%Y-%m-%dT%H:%M:%SZ) ====="
 
 command -v apptainer &>/dev/null || module load apptainer 2>/dev/null || \
     module load singularity 2>/dev/null
 
 ${SCRIPTS_DIR}/o2.sh build $EXTRA_ARGS
+RC=\$?
+echo "[INFO] ===== OAR job \${OAR_JOB_ID:-?} ended at \$(date -u +%Y-%m-%dT%H:%M:%SZ) with exit status \$RC ====="
+exit \$RC
 OAREOF
     chmod +x "$OAR_SCRIPT"
 
@@ -1730,8 +1748,20 @@ OAREOF
     [ -n "${O2_OAR_TYPE:-}"       ] && FLAGS="$FLAGS -t ${O2_OAR_TYPE}"
     [ "${O2_OAR_DEVEL:-0}" -eq 1 ] && FLAGS="$FLAGS -t devel"
 
-    local JOB_ID
-    JOB_ID=$(oarsub $FLAGS -S "$OAR_SCRIPT" | grep -oP 'OAR_JOB_ID=\K[0-9]+')
+    # Keep oarsub's own output: if it refuses the request (bad resources,
+    # project, quota...) the reason must be visible, not swallowed by 'set -e'.
+    local SUBMIT_OUT JOB_ID
+    if ! SUBMIT_OUT="$(oarsub $FLAGS -S "$OAR_SCRIPT" 2>&1)"; then
+        log_error "oarsub failed:"
+        printf '%s\n' "$SUBMIT_OUT" | sed 's/^/    /' >&2
+        exit 1
+    fi
+    JOB_ID="$(printf '%s\n' "$SUBMIT_OUT" | grep -oP 'OAR_JOB_ID=\K[0-9]+' | head -1 || true)"
+    if [ -z "$JOB_ID" ]; then
+        log_error "oarsub returned no job id. Its output:"
+        printf '%s\n' "$SUBMIT_OUT" | sed 's/^/    /' >&2
+        exit 1
+    fi
 
     log_info "OAR job submitted: $JOB_ID"
     log_info "Monitor  : o2 deploy --status"
