@@ -18,6 +18,8 @@ cmd_deploy() {
     local STATUS_ONLY=0
     local LOG_ONLY=0
     local DRY_RUN=0
+    local EXTEND=0
+    local EXTEND_BY=""
 
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -27,6 +29,11 @@ cmd_deploy() {
             --status)       STATUS_ONLY=1 ;;
             --log)          LOG_ONLY=1 ;;
             --dry-run)      DRY_RUN=1 ;;
+            --extend)       EXTEND=1
+                            # optional amount: +H, +H:MM or +H:MM:SS
+                            if [[ $# -gt 1 && "$2" =~ ^\+[0-9]+(:[0-9]{1,2}){0,2}$ ]]; then
+                                EXTEND_BY="$2"; shift
+                            fi ;;
             --help|-h)      _deploy_help; return 0 ;;
             *)              log_warn "Unknown option: $1" ;;
         esac
@@ -40,6 +47,9 @@ cmd_deploy() {
     fi
     if [ "$LOG_ONLY" -eq 1 ]; then
         _deploy_log "$HPC_LOGIN"; return
+    fi
+    if [ "$EXTEND" -eq 1 ]; then
+        _deploy_extend "$HPC_LOGIN" "$EXTEND_BY"; return
     fi
 
     log_sep
@@ -55,6 +65,7 @@ cmd_deploy() {
         log_info "Mode   : --dry-run (read-only, nothing is changed on the cluster)"
         O2_DEPLOY_DRYRUN=1
         _DEPLOY_DRY_PENDING=0
+        _DEPLOY_DRY_SYNC=0
         _deploy_sync         "$HPC_LOGIN"
         _deploy_sync_sources "$HPC_LOGIN"
         _deploy_tasks_check  "$HPC_LOGIN"
@@ -93,6 +104,10 @@ Options:
   --build-only     sync + launch O2Physics build only (no sandbox rebuild)
   --status         show running OAR jobs on HPC
   --log            tail the remote O2Physics build log
+  --extend [+H:MM] ask OAR for more time for the RUNNING build job (runs oarwalltime on
+                   the login node: the OAR commands do not exist on compute nodes).
+                   Without an amount, only shows the job's walltime-change status.
+                   OAR decides: the request may be pending or refused, e.g. +4:00:00
   --dry-run        read-only check: list what a deploy would change on the cluster
                    (scripts, analysis, O2Physics source) and verify that every
                    enabled task is in the synced source, in CMakeLists.txt and built
@@ -296,12 +311,32 @@ SYNCEOF"
     local LOCK_CONTENT
     LOCK_CONTENT=$(ssh "$HPC_LOGIN" "cat $LOCK_FILE 2>/dev/null || true")
     if [ -n "$LOCK_CONTENT" ]; then
-        log_warn "Build lock detected on cluster — a build is in progress:"
+        log_warn "Build lock detected on cluster:"
         echo "$LOCK_CONTENT" | sed 's/^/    /' >&2
-        log_warn "Skipping SOURCES/O2Physics cleanup to avoid corrupting the build."
-        log_warn "If the lock is stale, remove it with:"
-        log_warn "  ssh $HPC_LOGIN rm -f $LOCK_FILE"
-        log_warn "Then re-run: o2 deploy --build-only"
+        # State of the job that owns the lock. A build killed at its walltime
+        # leaves its lock behind (OAR does not run the owner's trap), and the OAR
+        # commands do not exist on the compute nodes: the login node, where
+        # oarstat works, is the right place to recognize a stale lock.
+        local LOCK_JOB LOCK_JOB_STATE LOCK_JOB_ROW
+        LOCK_JOB="$(printf '%s\n' "$LOCK_CONTENT" | sed -n 's/^oar_job=//p')"
+        if [[ "$LOCK_JOB" =~ ^[0-9]+$ ]]; then
+            LOCK_JOB_STATE="$(ssh "$HPC_LOGIN" "oarstat -j $LOCK_JOB 2>&1 | grep -E 'Job id|^ *$LOCK_JOB '" || true)"
+            [ -n "$LOCK_JOB_STATE" ] && { log_warn "Owner job $LOCK_JOB:"; echo "$LOCK_JOB_STATE" | sed 's/^/    /'; }
+            # Only the job's own row decides, and only a clearly terminal state
+            # counts as evidence (an oarstat failure must never free a live lock).
+            LOCK_JOB_ROW="$(printf '%s\n' "$LOCK_JOB_STATE" | grep -E "^ *$LOCK_JOB " || true)"
+            if printf '%s\n' "$LOCK_JOB_ROW" | grep -qiE 'running|launching|waiting|hold|resuming|suspended|finishing'; then
+                :   # alive: keep the lock
+            elif printf '%s\n' "$LOCK_JOB_ROW" | grep -qiE 'terminated|error|killed'; then
+                log_warn "Owner job $LOCK_JOB is no longer alive: removing the stale lock."
+                ssh "$HPC_LOGIN" "rm -f $LOCK_FILE"
+                LOCK_CONTENT=""
+            fi
+        fi
+    fi
+    if [ -n "$LOCK_CONTENT" ]; then
+        log_warn "Skipping SOURCES/O2Physics cleanup to avoid corrupting a running build."
+        log_warn "If you are sure the lock is stale: ssh $HPC_LOGIN rm -f $LOCK_FILE"
         return
     fi
 
@@ -359,15 +394,79 @@ _deploy_launch() {
 _deploy_status() {
     local HPC_LOGIN="$1"
     log_info "O2Physics OAR jobs on $HPC_LOGIN :"
-    # Use oarstat -J (JSON) and jq to filter only O2Physics jobs by name
-    # Note: jq filter passed via env var to avoid quoting issues over SSH
-    ssh "$HPC_LOGIN" \
-        'JQ_FILTER='"'"'to_entries[] | select(.value.name != null and (.value.name | test("^O2"))) | [.key, .value.state, .value.name, (.value.message | split(",")[1] | ltrimstr("W=") // "?")] | @tsv'"'"'; oarstat -u '"${O2_HPC_USER}"' -J 2>/dev/null | jq -r "$JQ_FILTER" 2>/dev/null || echo "No O2Physics OAR jobs found"'
+    # Plain-text 'oarstat -u' listing, filtered on the job name. (The former
+    # 'oarstat -J | jq' filter swallowed its own errors and answered "no job"
+    # while a build was Waiting.)
+    local OUT RC=0 BUILD_ACTIVE=0
+    OUT="$(ssh "$HPC_LOGIN" "oarstat -u ${O2_HPC_USER} 2>&1")" || RC=$?
+    if [ "$RC" -ne 0 ]; then
+        log_error "  oarstat failed over ssh (exit status $RC):"
+        printf '%s\n' "$OUT" | sed 's/^/    /' >&2
+        return 1
+    fi
+    if printf '%s\n' "$OUT" | grep -q 'O2Physics'; then
+        BUILD_ACTIVE=1
+        printf '%s\n' "$OUT" | grep -E 'Job id|O2Physics' | sed 's/[[:space:]]*$//'
+    else
+        echo "  No O2Physics build job queued or running."
+    fi
+
+    # Result of the last build that FINISHED (written by the build itself).
+    local ST BSTATUS BDATE BCODE
+    ST="$(ssh "$HPC_LOGIN" "cat ${O2_HPC_HOME_DIR}/logs/build_status 2>/dev/null || true")"
+    echo ""
+    log_info "Last finished build:"
+    if [ -z "$ST" ]; then
+        echo "  no build status recorded yet (${O2_HPC_HOME_DIR}/logs/build_status)"
+    else
+        BSTATUS="$(printf '%s\n' "$ST" | sed -n 's/^status=//p')"
+        BDATE="$(printf '%s\n' "$ST" | sed -n 's/^finished_at=//p')"
+        BCODE="$(printf '%s\n' "$ST" | sed -n 's/^exit_code=//p')"
+        echo "  status=${BSTATUS:-unknown}  finished_at=${BDATE:-?}${BCODE:+  exit_code=$BCODE}"
+        if [ "$BUILD_ACTIVE" -eq 1 ]; then
+            echo "  (a build job is queued or running: this is the result of the PREVIOUS build)"
+        fi
+    fi
 }
 
 # ==============================================================================
 # _deploy_log
 # ==============================================================================
+# _deploy_extend <hpc_login> [<+H:MM:SS>]
+# Asks OAR for more time for the RUNNING O2Physics build job with oarwalltime,
+# run on the login node (the OAR client commands do not exist on the compute
+# nodes of dahu, so a job cannot extend itself). Without an amount, only shows
+# the walltime-change status. OAR decides: the request may stay pending or be
+# refused (feature disabled, resources reserved by another job).
+_deploy_extend() {
+    local HPC_LOGIN="$1" BY="$2"
+    local OUT RC=0 JOB
+    OUT="$(ssh "$HPC_LOGIN" "oarstat -u ${O2_HPC_USER} 2>&1")" || RC=$?
+    if [ "$RC" -ne 0 ]; then
+        log_error "oarstat failed over ssh (exit status $RC):"
+        printf '%s\n' "$OUT" | sed 's/^/    /' >&2
+        return 1
+    fi
+    JOB="$(printf '%s\n' "$OUT" | awk '/O2Physics_full_build/ && /Running/ { print $1; exit }')"
+    if [ -z "$JOB" ]; then
+        if printf '%s\n' "$OUT" | grep -q 'O2Physics_full_build'; then
+            log_warn "The O2Physics build job is queued, not running yet: oarwalltime only applies to a RUNNING job."
+        else
+            log_info "No O2Physics build job running (nothing to extend)."
+        fi
+        return 0
+    fi
+
+    if [ -z "$BY" ]; then
+        log_info "Walltime-change status of job $JOB (to request more time: o2 deploy --extend +4:00:00):"
+        ssh "$HPC_LOGIN" "oarwalltime $JOB 2>&1" | sed 's/^/  /' || true
+    else
+        log_info "Asking OAR for $BY more for job $JOB (OAR decides; the request may be pending or refused):"
+        ssh "$HPC_LOGIN" "oarwalltime $JOB $BY 2>&1" | sed 's/^/  /' || true
+        log_info "Check later with: o2 deploy --extend"
+    fi
+}
+
 _deploy_log() {
     local HPC_LOGIN="$1"
     log_info "Tailing remote build log..."
@@ -399,6 +498,7 @@ _deploy_rsync() {
         log_error "  rsync dry-run failed for: $LABEL"
         printf '%s\n' "$OUT" | sed 's/^/      /' >&2
         _DEPLOY_DRY_PENDING=$((_DEPLOY_DRY_PENDING + 1))
+        _DEPLOY_DRY_SYNC=$((${_DEPLOY_DRY_SYNC:-0} + 1))
         return 0
     fi
     _deploy_dry_report "$LABEL" "$OUT"
@@ -426,6 +526,7 @@ _deploy_dry_report() {
     printf '%s\n' "$CHANGES" | head -25 | sed 's/^/         /'
     [ "$N_ALL" -gt 25 ] && echo "         ... ($((N_ALL - 25)) more)"
     _DEPLOY_DRY_PENDING=$((_DEPLOY_DRY_PENDING + N_ALL))
+    _DEPLOY_DRY_SYNC=$((${_DEPLOY_DRY_SYNC:-0} + N_ALL))
     return 0
 }
 
@@ -530,9 +631,14 @@ _deploy_dry_verdict() {
         log_info "Cluster is up to date: nothing to deploy, enabled tasks are built."
         return 0
     fi
-    log_warn "$_DEPLOY_DRY_PENDING item(s) out of date on the cluster. To fix:"
-    log_warn "  1) o2 deploy --sync-only    (push scripts, analysis and O2Physics source)"
-    log_warn "  2) o2 deploy --build-only   (rebuild O2Physics on the cluster)"
-    log_warn "  then re-run: o2 deploy --dry-run"
+    local N_SYNC="${_DEPLOY_DRY_SYNC:-0}" N_BUILD
+    N_BUILD=$((_DEPLOY_DRY_PENDING - N_SYNC))
+    log_warn "$_DEPLOY_DRY_PENDING item(s) out of date on the cluster ($N_SYNC to synchronize, $N_BUILD about the build)."
+    if [ "$N_BUILD" -gt 0 ]; then
+        log_warn "To fix: o2 deploy --build-only   (synchronizes first, then rebuilds O2Physics on the cluster)"
+    else
+        log_warn "To fix: o2 deploy --sync-only    (push scripts, analysis and O2Physics source)"
+    fi
+    log_warn "Then re-run: o2 deploy --dry-run"
     return 1
 }

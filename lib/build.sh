@@ -168,14 +168,61 @@ cmd_build() {
 # touching SOURCES/ — see lib/deploy.sh and lib/sync.sh, which must stay
 # in sync with this path.
 # ==============================================================================
+# _build_lock_stale_reason <lockfile>
+# Prints a reason and returns 0 when the lock cannot belong to a live build.
+# Conservative: without positive evidence the lock is kept. The trap EXIT of
+# the owner is NOT enough: OAR kills a job that exceeds its walltime without
+# running it, which used to leave a lock that blocked every later build.
+#
+# There is deliberately NO "older than the walltime" rule: a job whose walltime
+# was extended (oarwalltime) legitimately outlives O2_OAR_WALLTIME, and its lock
+# would be stolen by a second build. On dahu the OAR commands (oarstat,
+# oarwalltime...) do not exist on the compute nodes, so inside a job only the
+# rule 1 can apply; the authoritative cleanup is done by 'o2 deploy' on the
+# login node, where oarstat works (see _deploy_sync_sources).
+_build_lock_stale_reason() {
+    local LOCK="$1" PID HOST JOB
+    PID="$(sed -n 's/^pid=//p' "$LOCK")"
+    HOST="$(sed -n 's/^host=//p' "$LOCK")"
+    JOB="$(sed -n 's/^oar_job=//p' "$LOCK")"
+
+    # 1. Same machine: the process that took the lock no longer exists.
+    if [ -n "$PID" ] && [ "$HOST" = "$(hostname -s)" ] && ! kill -0 "$PID" 2>/dev/null; then
+        echo "process $PID no longer exists on $HOST"
+        return 0
+    fi
+
+    # 2. An OAR build, where oarstat is available (login node, not compute
+    #    nodes): ask OAR. Only a clearly terminal state counts as evidence: an
+    #    oarstat failure must never make us delete a live build's lock.
+    if [ -n "$JOB" ] && [ "$JOB" != "local" ] && command -v oarstat >/dev/null 2>&1; then
+        local ST
+        ST="$(oarstat -j "$JOB" 2>/dev/null || true)"
+        if printf '%s\n' "$ST" | grep -qiE 'running|launching|waiting|hold|resuming|suspended|finishing'; then
+            return 1
+        elif printf '%s\n' "$ST" | grep -qiE 'terminated|error|killed'; then
+            echo "OAR job $JOB is no longer alive"
+            return 0
+        fi
+    fi
+    return 1
+}
+
 _build_lock_acquire() {
     local LOCK="$BUILD_LOCK_FILE"
     if [ -f "$LOCK" ]; then
-        log_warn "Build lock exists: $LOCK"
-        log_warn "Contents:"
-        cat "$LOCK" | sed 's/^/    /' >&2
-        log_error "Another build may be running. Remove $LOCK manually if it is stale."
-        exit 1
+        local REASON
+        if REASON="$(_build_lock_stale_reason "$LOCK")"; then
+            log_warn "Stale build lock removed: $REASON"
+            sed 's/^/    /' "$LOCK" >&2
+            rm -f "$LOCK"
+        else
+            log_warn "Build lock exists: $LOCK"
+            log_warn "Contents:"
+            cat "$LOCK" | sed 's/^/    /' >&2
+            log_error "Another build may be running. Remove $LOCK manually if it is stale."
+            exit 1
+        fi
     fi
     mkdir -p "$(dirname "$LOCK")"
     cat > "$LOCK" << LOCKEOF
@@ -958,8 +1005,17 @@ _refresh_master_source() {
     # _resolve_worktree earlier; -e covers both cases.
     [ -e "$O2PHYSICS_MASTER_SRC/.git" ] || return 0
 
+    # Refreshing master means 'git fetch upstream' in the developer's clone:
+    # only meaningful on the local machine. On the cluster the tree is a plain
+    # rsync of the local one (no 'upstream' remote guaranteed, no network
+    # guarantee on the login node).
+    [ "${ENV_TYPE:-local}" = "local" ] || return 0
+
+    # Every git call below is informational: under 'set -e' a failing
+    # $(git ...) used to abort the whole o2.sh silently with git's exit status
+    # (128), e.g. when the clone has no 'upstream/master' ref.
     local BEFORE
-    BEFORE=$(git -C "$O2PHYSICS_SRC" rev-parse upstream/master 2>/dev/null)
+    BEFORE=$(git -C "$O2PHYSICS_SRC" rev-parse upstream/master 2>/dev/null || true)
 
     git -C "$O2PHYSICS_SRC" fetch upstream --quiet 2>/dev/null || {
         log_warn "Couldn't refresh master (no network / upstream unreachable) — using last known state"
@@ -967,10 +1023,10 @@ _refresh_master_source() {
     }
 
     local AFTER
-    AFTER=$(git -C "$O2PHYSICS_SRC" rev-parse upstream/master 2>/dev/null)
+    AFTER=$(git -C "$O2PHYSICS_SRC" rev-parse upstream/master 2>/dev/null || true)
 
     if [ -n "$AFTER" ] && [ "$BEFORE" != "$AFTER" ]; then
-        git -C "$O2PHYSICS_MASTER_SRC" reset --hard upstream/master --quiet 2>/dev/null
+        git -C "$O2PHYSICS_MASTER_SRC" reset --hard upstream/master --quiet 2>/dev/null || true
         log_info "master refreshed: $(echo "$AFTER" | cut -c1-10) (was $(echo "${BEFORE:-none}" | cut -c1-10))"
     fi
 }
@@ -1574,7 +1630,8 @@ _check_mirrors() {
 
     # --- Check git mirrors integrity ---
     if [ -d "$MIRROR_DIR" ]; then
-        log_info "Checking git mirrors integrity..."
+        local T_FSCK=$SECONDS
+        log_info "Checking git mirrors integrity ($(date -u +%H:%M:%SZ))..."
         local TOTAL=0
         for mirror in "$MIRROR_DIR"/*/; do
             [ -d "$mirror" ] || continue
@@ -1588,7 +1645,7 @@ _check_mirrors() {
         if [ "$CORRUPTED" -gt 0 ]; then
             log_warn "Removed $CORRUPTED corrupted mirror(s) — aliBuild will re-clone"
         else
-            log_info "All $TOTAL mirrors OK"
+            log_info "All $TOTAL mirrors OK (fsck of all mirrors took $((SECONDS - T_FSCK)) s)"
         fi
     fi
 }
@@ -1598,6 +1655,7 @@ _check_mirrors() {
 # ==============================================================================
 _build_o2physics() {
     log_step "3/3 Building O2Physics (branch: $O2_DEV_BRANCH)..."
+
 
     # Check and clean corrupted mirrors before starting aliBuild
     _check_mirrors
@@ -1610,6 +1668,9 @@ _build_o2physics() {
     local BUILD_JOBS="$JOBS"
     local PHYSICS_VERSION="$O2_PHYSICS_VERSION"
     local BUILD_LOG="$LOG_DIR/o2physics.log"
+
+    local T_ALIBUILD=$SECONDS
+    log_info "Starting aliBuild ($(date -u +%H:%M:%SZ))..."
 
     _o2_container_raw -- bash -s         "$DEV_BRANCH" "$ALIBUILD_DEFAULTS" "$BUILD_JOBS" "$PHYSICS_VERSION"         << 'CONTAINER_EOF' 2>&1 | tee "$BUILD_LOG"
 set -e
@@ -1647,10 +1708,36 @@ else
     exit 1
 fi
 
-aliBuild build O2Physics --work-dir /alice/sw \
-    --defaults "$ALIBUILD_DEFAULTS" \
-    --jobs "$BUILD_JOBS"
-ALIBUILD_RC=$?
+# aliBuild kills any git command that runs longer than its FIXED timeout
+# (120 s by default, 600 s for clone/checkout; not configurable in 1.17.x) and
+# then aborts. For very large repositories (onnxruntime, ...) the git process
+# nevertheless finishes in the background, so simply running aliBuild again
+# gets past that step. Retry ONLY that failure (a git timeout), a bounded
+# number of times; any other failure stops at once.
+MAX_ATTEMPTS=4
+ATTEMPT=1
+ALIBUILD_LOG=/tmp/aliBuild_attempt.log
+while :; do
+    set +e
+    aliBuild build O2Physics --work-dir /alice/sw \
+        --defaults "$ALIBUILD_DEFAULTS" \
+        --jobs "$BUILD_JOBS" 2>&1 | tee "$ALIBUILD_LOG"
+    ALIBUILD_RC=${PIPESTATUS[0]}
+    set -e
+    [ "$ALIBUILD_RC" -eq 0 ] && break
+    if [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ] \
+       && grep -q "timed out; terminated" "$ALIBUILD_LOG" \
+       && grep -qE "Error during git (checkout|clone|fetch|ls-remote)" "$ALIBUILD_LOG"; then
+        echo "[WARNING] aliBuild stopped on a git timeout (attempt $ATTEMPT/$MAX_ATTEMPTS, $(date -u +%H:%M:%SZ))"
+        echo "[WARNING] the git process normally finishes in the background: retrying in 30 s"
+        sleep 30
+        # a git process killed in the middle can leave an index.lock behind
+        find /alice/sw/SOURCES -name index.lock -mmin +1 -print -delete 2>/dev/null || true
+        ATTEMPT=$((ATTEMPT + 1))
+        continue
+    fi
+    break
+done
 
 if [ $ALIBUILD_RC -eq 0 ]; then
     echo "[INFO] aliBuild completed successfully"
@@ -1659,15 +1746,18 @@ if [ $ALIBUILD_RC -eq 0 ]; then
     echo "branch=$DEV_BRANCH"
     echo "defaults=$ALIBUILD_DEFAULTS"
 else
-    echo "[ERROR] aliBuild failed with exit code $ALIBUILD_RC"
+    echo "[ERROR] aliBuild failed with exit code $ALIBUILD_RC (attempt $ATTEMPT of $MAX_ATTEMPTS)"
     echo "status=failed"
     echo "finished_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     echo "exit_code=$ALIBUILD_RC"
+    # The container's exit status is what the host reads: do not lose it.
+    exit "$ALIBUILD_RC"
 fi
 CONTAINER_EOF
 
 # Capture aliBuild exit code through the pipe (tee loses it otherwise)
 BUILD_RC=${PIPESTATUS[0]}
+log_info "aliBuild step ended with exit status $BUILD_RC after $((SECONDS - T_ALIBUILD)) s ($(date -u +%H:%M:%SZ))"
 
 # Write build status file readable by 'o2 sync' and 'o2 status'
 local STATUS_FILE="$LOG_DIR/build_status"
