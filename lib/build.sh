@@ -132,7 +132,10 @@ cmd_build() {
 
     # Local or inside scheduler job: full build
     _build_lock_acquire
-    trap '_build_lock_release' EXIT SIGTERM SIGINT
+    trap '_build_lock_release' EXIT SIGINT
+    # SIGTERM (OAR checkpoint stop, scancel...): leave at once, without writing a
+    # misleading "failed" build_status. The EXIT trap releases the lock.
+    trap 'exit 143' SIGTERM
 
     if [ "$BUILD_ONLY" -eq 0 ]; then
         [ "$ENV_TYPE" = "local" ] && _git_setup_fork
@@ -1818,25 +1821,85 @@ _build_submit_oar() {
 #!/bin/bash
 #OAR -n O2Physics_full_build
 #OAR -l ${OAR_RESOURCES},walltime=${O2_OAR_WALLTIME}
-#OAR --stdout $LOG_DIR/oar_full_build.log
-#OAR --stderr $LOG_DIR/oar_full_build.err
+#OAR --stdout $LOG_DIR/oar_full_build.%jobid%.log
+#OAR --stderr $LOG_DIR/oar_full_build.%jobid%.err
 #OAR --notify mail:${O2_EMAIL}
 
 echo "[INFO] ===== OAR job \${OAR_JOB_ID:-?} started on \$(hostname -s) at \$(date -u +%Y-%m-%dT%H:%M:%SZ) ====="
 
+# One log per OAR job (a checkpointed build spans several jobs). Fixed paths
+# for the log and err of the CURRENT job: oar_full_build.log / oar_full_build.err
+# (relative links, so that 'tail -f oar_full_build.log' follows the latest job).
+if [ -n "\${OAR_JOB_ID:-}" ]; then
+    ln -sfn "oar_full_build.\${OAR_JOB_ID}.log" "$LOG_DIR/oar_full_build.log"
+    ln -sfn "oar_full_build.\${OAR_JOB_ID}.err" "$LOG_DIR/oar_full_build.err"
+fi
+
 command -v apptainer &>/dev/null || module load apptainer 2>/dev/null || \
     module load singularity 2>/dev/null
 
-${SCRIPTS_DIR}/o2.sh build $EXTRA_ARGS
-RC=\$?
+# Checkpoint segments already done by earlier jobs of this build (see below).
+SEG_FILE="$LOG_DIR/.build_segments"
+SEG=\$(cat "\$SEG_FILE" 2>/dev/null || echo 0)
+if [ "\$SEG" -gt 0 ]; then
+    echo "[INFO] resumed build: this is segment \$((SEG + 1))"
+    # o2physics.log is rewritten by every segment: keep the previous one.
+    [ -f "$LOG_DIR/o2physics.log" ] && \
+        cp "$LOG_DIR/o2physics.log" "$LOG_DIR/o2physics.part\${SEG}.log"
+fi
+
+# OAR sends the checkpoint signal ONLY to this script (the first process of the
+# job), and bash runs a trap only once the foreground command has ended. So the
+# build runs in the background, in its own process group (set -m), and this
+# script waits for it: when the signal arrives, the whole group (o2.sh, apptainer,
+# aliBuild, make) is stopped, the build lock is released by o2.sh's EXIT trap,
+# and the job exits with status 99, which makes OAR resubmit it (-t idempotent).
+# aliBuild then resumes from what is already built.
+set -m
+CHECKPOINTED=0
+${SCRIPTS_DIR}/o2.sh build $EXTRA_ARGS &
+BUILD_PID=\$!
+_on_checkpoint() {
+    CHECKPOINTED=1
+    echo "[WARNING] checkpoint signal at \$(date -u +%Y-%m-%dT%H:%M:%SZ): walltime is close, stopping the build"
+    kill -TERM -- "-\$BUILD_PID" 2>/dev/null
+}
+trap _on_checkpoint USR1 USR2
+RC=0
+while :; do
+    wait "\$BUILD_PID"; RC=\$?
+    # wait also returns when a trapped signal arrives: loop until the build is gone
+    kill -0 "\$BUILD_PID" 2>/dev/null || break
+done
+trap - USR1 USR2
+
+if [ "\$CHECKPOINTED" -eq 1 ] && [ "\$RC" -ne 0 ]; then
+    SEG=\$((SEG + 1))
+    echo "\$SEG" > "\$SEG_FILE"
+    if [ "\$SEG" -le ${O2_OAR_MAX_SEGMENTS:-6} ]; then
+        echo "[INFO] build checkpointed (segment \$SEG): exiting with 99 so that OAR resubmits the job"
+        exit 99
+    fi
+    echo "[ERROR] build still unfinished after \$SEG segments: giving up (O2_OAR_MAX_SEGMENTS)"
+    echo "[INFO] ===== OAR job \${OAR_JOB_ID:-?} ended at \$(date -u +%Y-%m-%dT%H:%M:%SZ) with exit status 1 ====="
+    exit 1
+fi
+[ "\$RC" -eq 0 ] && rm -f "\$SEG_FILE"
 echo "[INFO] ===== OAR job \${OAR_JOB_ID:-?} ended at \$(date -u +%Y-%m-%dT%H:%M:%SZ) with exit status \$RC ====="
 exit \$RC
 OAREOF
     chmod +x "$OAR_SCRIPT"
+    rm -f "$LOG_DIR/.build_segments"   # a new submission starts a new build
 
     local FLAGS="--project ${O2_OAR_PROJECT}"
     [ -n "${O2_OAR_TYPE:-}"       ] && FLAGS="$FLAGS -t ${O2_OAR_TYPE}"
     [ "${O2_OAR_DEVEL:-0}" -eq 1 ] && FLAGS="$FLAGS -t devel"
+    # Checkpoint + automatic resubmission: a build longer than the walltime is
+    # continued by a new job instead of being killed (see the OAR script above).
+    if [ "${O2_OAR_CHECKPOINT:-0}" -gt 0 ] && [ "${O2_OAR_AUTORESUBMIT:-0}" -eq 1 ]; then
+        FLAGS="$FLAGS --checkpoint ${O2_OAR_CHECKPOINT} -t idempotent"
+        log_info "Checkpoint ${O2_OAR_CHECKPOINT}s before the walltime, automatic resubmission (max ${O2_OAR_MAX_SEGMENTS:-6})"
+    fi
 
     # Keep oarsub's own output: if it refuses the request (bad resources,
     # project, quota...) the reason must be visible, not swallowed by 'set -e'.
@@ -1855,7 +1918,7 @@ OAREOF
 
     log_info "OAR job submitted: $JOB_ID"
     log_info "Monitor  : o2 deploy --status"
-    log_info "Full log : $LOG_DIR/oar_full_build.log"
+    log_info "Full log : $LOG_DIR/oar_full_build.${JOB_ID}.log  (latest job: $LOG_DIR/oar_full_build.log)"
 }
 
 # ==============================================================================

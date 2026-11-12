@@ -104,10 +104,13 @@ Options:
   --build-only     sync + launch O2Physics build only (no sandbox rebuild)
   --status         show running OAR jobs on HPC
   --log            tail the remote O2Physics build log
-  --extend [+H:MM] ask OAR for more time for the RUNNING build job (runs oarwalltime on
-                   the login node: the OAR commands do not exist on compute nodes).
-                   Without an amount, only shows the job's walltime-change status.
+  --extend [+H:MM] manual override: ask OAR for more time for the RUNNING build job (runs
+                   oarwalltime on the login node: the OAR commands do not exist on compute
+                   nodes). Without an amount, only shows the job's walltime-change status.
                    OAR decides: the request may be pending or refused, e.g. +4:00:00
+                   Normally not needed: the build job is checkpointed before its walltime
+                   and resubmitted by OAR (O2_OAR_CHECKPOINT / O2_OAR_AUTORESUBMIT in
+                   o2_config.sh), and aliBuild resumes where it stopped.
   --dry-run        read-only check: list what a deploy would change on the cluster
                    (scripts, analysis, O2Physics source) and verify that every
                    enabled task is in the synced source, in CMakeLists.txt and built

@@ -151,6 +151,19 @@ O2_OAR_CORES=""
 O2_OAR_TYPE=""  # set to a valid OAR 3 job type if needed (e.g. besteffort, deploy)
 O2_OAR_DEVEL=0
 
+# Build job that outlives its walltime: instead of asking OAR for more time
+# (oarwalltime is only a request and may be refused), the build job is
+# checkpointed and resubmitted by OAR, and aliBuild resumes where it stopped.
+#   O2_OAR_CHECKPOINT  seconds before the walltime at which OAR signals the job
+#                      (oarsub --checkpoint). 0 = feature off.
+#   O2_OAR_AUTORESUBMIT 1 = submit with '-t idempotent': OAR resubmits the job
+#                      itself when it exits with status 99.
+#   O2_OAR_MAX_SEGMENTS maximum number of resubmissions of one build (guard
+#                      against an endless loop).
+O2_OAR_CHECKPOINT=900
+O2_OAR_AUTORESUBMIT=1
+O2_OAR_MAX_SEGMENTS=6
+
 # ------------------------------------------------------------------------------
 # Deployment
 # o2_config.sh is excluded — a sanitized version is generated automatically.
