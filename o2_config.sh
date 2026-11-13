@@ -164,6 +164,20 @@ O2_OAR_CHECKPOINT=900
 O2_OAR_AUTORESUBMIT=1
 O2_OAR_MAX_SEGMENTS=6
 
+# Stalled shared file system (/bettik stops answering: every git call of aliBuild
+# then times out after its fixed 120 s). The build does not burn its walltime on
+# it: it waits for the file system, and if it stays silent it exits with status
+# 99 so that OAR resubmits the job (needs O2_OAR_AUTORESUBMIT=1).
+#   O2_FS_PROBE_TIMEOUT  seconds a path may take to answer before it counts as stalled
+#   O2_FS_WAIT_MAX       total seconds to wait inside a job before requeuing (min 120)
+#   O2_OAR_MAX_STALLS    maximum number of such requeues of one build
+#   O2_FSCK_TIMEOUT      seconds per mirror for the integrity check (a timeout never
+#                        deletes a mirror)
+O2_FS_PROBE_TIMEOUT=45
+O2_FS_WAIT_MAX=2400
+O2_OAR_MAX_STALLS=8
+O2_FSCK_TIMEOUT=300
+
 # ------------------------------------------------------------------------------
 # Deployment
 # o2_config.sh is excluded — a sanitized version is generated automatically.

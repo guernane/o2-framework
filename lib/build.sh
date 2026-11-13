@@ -1632,20 +1632,54 @@ _check_mirrors() {
     fi
 
     # --- Check git mirrors integrity ---
+    # A mirror is deleted ONLY on positive evidence of damage, confirmed by a
+    # second fsck. A timeout or an I/O error says something about the file
+    # system, not about the mirror: on a stalled /bettik the former test
+    # ("fsck failed => rm -rf") would have destroyed perfectly good mirrors.
+    # A stalled file system sets _FS_STALLED=1 (the caller requeues the job).
+    _FS_STALLED=0
     if [ -d "$MIRROR_DIR" ]; then
         local T_FSCK=$SECONDS
+        local FSCK_T="${O2_FSCK_TIMEOUT:-300}"
+        local DAMAGE_RE='unresolved deltas|missing (blob|tree|commit|tag)|corrupt|bad object|broken link|did not receive expected object|data stream error|index-pack failed'
         log_info "Checking git mirrors integrity ($(date -u +%H:%M:%SZ))..."
-        local TOTAL=0
+        local TOTAL=0 OUT OUT2 RC RC2 PRC
         for mirror in "$MIRROR_DIR"/*/; do
             [ -d "$mirror" ] || continue
             TOTAL=$(( TOTAL + 1 ))
-            if ! git -C "$mirror" fsck 2>/dev/null 1>/dev/null; then
-                log_warn "Corrupted mirror: $(basename "$mirror") — removing"
-                rm -rf "$mirror"
-                CORRUPTED=$(( CORRUPTED + 1 ))
+            RC=0
+            OUT="$(timeout "$FSCK_T" git -C "$mirror" fsck 2>&1)" || RC=$?
+            [ "$RC" -eq 0 ] && continue
+            if [ "$RC" -eq 124 ]; then
+                # Too slow. Slow is not corrupted: does the file system answer at all?
+                PRC=0
+                timeout "${O2_FS_PROBE_TIMEOUT:-45}" stat "$mirror" >/dev/null 2>&1 || PRC=$?
+                if [ "$PRC" -eq 124 ]; then
+                    log_warn "The file system does not answer (stat of $(basename "$mirror") timed out): stalled"
+                    _FS_STALLED=1
+                    break
+                fi
+                log_warn "fsck of $(basename "$mirror") exceeded ${FSCK_T} s but the file system answers: mirror kept, not checked"
+                continue
+            fi
+            if printf '%s\n' "$OUT" | grep -qE "$DAMAGE_RE"; then
+                RC2=0
+                OUT2="$(timeout "$FSCK_T" git -C "$mirror" fsck 2>&1)" || RC2=$?
+                if [ "$RC2" -ne 0 ] && [ "$RC2" -ne 124 ] && printf '%s\n' "$OUT2" | grep -qE "$DAMAGE_RE"; then
+                    log_warn "Corrupted mirror: $(basename "$mirror") — removing"
+                    rm -rf "$mirror"
+                    CORRUPTED=$(( CORRUPTED + 1 ))
+                else
+                    log_warn "fsck of $(basename "$mirror") reported damage once, not confirmed by a second run: mirror kept"
+                fi
+            else
+                log_warn "fsck of $(basename "$mirror") failed (exit $RC) without any sign of corruption (I/O error?): mirror kept"
+                printf '%s\n' "$OUT" | head -3 | sed 's/^/    /' >&2
             fi
         done
-        if [ "$CORRUPTED" -gt 0 ]; then
+        if [ "$_FS_STALLED" -eq 1 ]; then
+            :
+        elif [ "$CORRUPTED" -gt 0 ]; then
             log_warn "Removed $CORRUPTED corrupted mirror(s) — aliBuild will re-clone"
         else
             log_info "All $TOTAL mirrors OK (fsck of all mirrors took $((SECONDS - T_FSCK)) s)"
@@ -1662,6 +1696,14 @@ _build_o2physics() {
 
     # Check and clean corrupted mirrors before starting aliBuild
     _check_mirrors
+    if [ "${_FS_STALLED:-0}" -eq 1 ]; then
+        # Not a build failure: the file system stopped answering. Exit status 99
+        # asks OAR to resubmit the job (see _build_submit_oar); nothing is lost.
+        printf 'status=requeued\nfinished_at=%s\nreason=file system stalled (mirror check)\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOG_DIR/build_status"
+        log_warn "File system stalled: requeue requested (exit 99)"
+        return 99
+    fi
     _setup_git_safe
 
     # Pass host variables explicitly as env vars so the single-quoted
@@ -1671,16 +1713,62 @@ _build_o2physics() {
     local BUILD_JOBS="$JOBS"
     local PHYSICS_VERSION="$O2_PHYSICS_VERSION"
     local BUILD_LOG="$LOG_DIR/o2physics.log"
+    # File-system guard (see fs_probe in the container script below). The wait must
+    # be long enough for the job to run more than 60 s before it exits with 99,
+    # otherwise OAR does not resubmit an idempotent job.
+    local FS_WAIT_MAX="${O2_FS_WAIT_MAX:-2400}" FS_PROBE_T="${O2_FS_PROBE_TIMEOUT:-45}"
+    [ "$FS_WAIT_MAX" -ge 120 ] || FS_WAIT_MAX=120
 
     local T_ALIBUILD=$SECONDS
     log_info "Starting aliBuild ($(date -u +%H:%M:%SZ))..."
 
-    _o2_container_raw -- bash -s         "$DEV_BRANCH" "$ALIBUILD_DEFAULTS" "$BUILD_JOBS" "$PHYSICS_VERSION"         << 'CONTAINER_EOF' 2>&1 | tee "$BUILD_LOG"
+    _o2_container_raw -- bash -s         "$DEV_BRANCH" "$ALIBUILD_DEFAULTS" "$BUILD_JOBS" "$PHYSICS_VERSION" "$FS_WAIT_MAX" "$FS_PROBE_T" << 'CONTAINER_EOF' 2>&1 | tee "$BUILD_LOG"
 set -e
 DEV_BRANCH="$1"
 ALIBUILD_DEFAULTS="$2"
 BUILD_JOBS="$3"
 PHYSICS_VERSION="$4"
+FS_WAIT_MAX="${5:-2400}"   # longest total wait for a stalled file system (s)
+FS_PROBE_T="${6:-45}"      # a path that does not answer within this is "stalled" (s)
+FS_WAS_STALLED=0
+
+# --- file-system guard --------------------------------------------------------
+# aliBuild runs 'git ls-remote' on the local mirror of EVERY package, with a
+# FIXED 120 s timeout (not tunable). When the shared file system stalls (even a
+# plain stat of a directory hangs), all of those calls time out and a whole
+# aliBuild attempt (about an hour) is burnt for nothing, four times in a row.
+# So aliBuild is never started, nor retried, while the file system is silent.
+fs_probe() {
+    command -v timeout >/dev/null 2>&1 || return 0
+    local T="${1:-45}" LIST RC=0
+    LIST="$(timeout "$T" find /alice/sw/MIRROR -mindepth 1 -maxdepth 1 -type d 2>/dev/null)" || RC=$?
+    [ "$RC" -eq 124 ] && return 1
+    # the same calls as aliBuild (4 at a time); only a TIMEOUT counts as a stall
+    { printf '%s\n' "$LIST"; echo /alice/sw/O2Physics; } | grep -v '^$' | \
+        GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0='*' \
+        xargs -d '\n' -r -P4 -I{} sh -c 'timeout "$0" git ls-remote --heads --tags "$1" >/dev/null 2>&1; [ $? -ne 124 ] || exit 255' "$T" {}
+}
+
+# Waits (exponential back-off, 60 s .. 10 min) until the file system answers.
+# Returns 1 after FS_WAIT_MAX seconds of waiting.
+wait_fs_healthy() {
+    local WAITED=0 STEP="${O2_FS_WAIT_STEP:-60}"
+    until fs_probe "$FS_PROBE_T"; do
+        if [ "$WAITED" -ge "$FS_WAIT_MAX" ]; then
+            echo "[ERROR] /alice/sw still does not answer after ${WAITED} s of waiting"
+            return 1
+        fi
+        echo "[WARNING] /alice/sw does not answer ($(date -u +%H:%M:%SZ)): waiting ${STEP} s (${WAITED}/${FS_WAIT_MAX} s)"
+        sleep "$STEP"
+        WAITED=$((WAITED + STEP))
+        STEP=$((STEP * 2)); [ "$STEP" -gt 600 ] && STEP=600
+    done
+    if [ "$WAITED" -gt 0 ]; then
+        FS_WAS_STALLED=1
+        echo "[INFO] /alice/sw answers again after ${WAITED} s of waiting"
+    fi
+    return 0
+}
 
 export ALIBUILD_WORK_DIR=/alice/sw
 export ALIBUILD_ANALYTICS=0
@@ -1719,7 +1807,11 @@ fi
 # number of times; any other failure stops at once.
 MAX_ATTEMPTS=4
 ATTEMPT=1
+STALL_RETRIES=0
 ALIBUILD_LOG=/tmp/aliBuild_attempt.log
+# Exit status 99 = "requeue me": the OAR job is idempotent, OAR resubmits it and
+# aliBuild resumes. It is NOT a build failure and leaves no 'failed' status.
+wait_fs_healthy || { echo "[ERROR] file system stalled: asking OAR to requeue the job (exit 99)"; exit 99; }
 while :; do
     set +e
     aliBuild build O2Physics --work-dir /alice/sw \
@@ -1736,7 +1828,16 @@ while :; do
         sleep 30
         # a git process killed in the middle can leave an index.lock behind
         find /alice/sw/SOURCES -name index.lock -mmin +1 -print -delete 2>/dev/null || true
-        ATTEMPT=$((ATTEMPT + 1))
+        # Do not retry into a stalled file system: wait for it (or requeue). A
+        # failure caused by a stall does not use up one of the MAX_ATTEMPTS.
+        FS_WAS_STALLED=0
+        wait_fs_healthy || { echo "[ERROR] file system stalled: asking OAR to requeue the job (exit 99)"; exit 99; }
+        if [ "$FS_WAS_STALLED" -eq 1 ]; then
+            STALL_RETRIES=$((STALL_RETRIES + 1))
+            [ "$STALL_RETRIES" -le 6 ] || { echo "[ERROR] the file system stalled again and again: asking OAR to requeue the job (exit 99)"; exit 99; }
+        else
+            ATTEMPT=$((ATTEMPT + 1))
+        fi
         continue
     fi
     break
@@ -1761,6 +1862,14 @@ CONTAINER_EOF
 # Capture aliBuild exit code through the pipe (tee loses it otherwise)
 BUILD_RC=${PIPESTATUS[0]}
 log_info "aliBuild step ended with exit status $BUILD_RC after $((SECONDS - T_ALIBUILD)) s ($(date -u +%H:%M:%SZ))"
+
+if [ "$BUILD_RC" -eq 99 ]; then
+    # The container asked for a requeue (file system stalled): not a failure.
+    printf 'status=requeued\nfinished_at=%s\nreason=file system stalled\nlog=%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BUILD_LOG" > "$LOG_DIR/build_status"
+    log_warn "File system stalled: requeue requested (exit 99) — see $BUILD_LOG"
+    return 99
+fi
 
 # Write build status file readable by 'o2 sync' and 'o2 status'
 local STATUS_FILE="$LOG_DIR/build_status"
@@ -1840,6 +1949,7 @@ command -v apptainer &>/dev/null || module load apptainer 2>/dev/null || \
 
 # Checkpoint segments already done by earlier jobs of this build (see below).
 SEG_FILE="$LOG_DIR/.build_segments"
+STALL_FILE="$LOG_DIR/.build_stalls"
 SEG=\$(cat "\$SEG_FILE" 2>/dev/null || echo 0)
 if [ "\$SEG" -gt 0 ]; then
     echo "[INFO] resumed build: this is segment \$((SEG + 1))"
@@ -1884,12 +1994,30 @@ if [ "\$CHECKPOINTED" -eq 1 ] && [ "\$RC" -ne 0 ]; then
     echo "[INFO] ===== OAR job \${OAR_JOB_ID:-?} ended at \$(date -u +%Y-%m-%dT%H:%M:%SZ) with exit status 1 ====="
     exit 1
 fi
-[ "\$RC" -eq 0 ] && rm -f "\$SEG_FILE"
+# o2.sh exits with 99 when the file system stopped answering (fs_probe in the
+# build): same recipe as the checkpoint, with its own counter. OAR resubmits an
+# idempotent job only if it ran for MORE than 60 s, so never leave earlier.
+if [ "\$RC" -eq 99 ]; then
+    STALL=\$(cat "\$STALL_FILE" 2>/dev/null || echo 0)
+    STALL=\$((STALL + 1))
+    echo "\$STALL" > "\$STALL_FILE"
+    if [ "\$STALL" -le ${O2_OAR_MAX_STALLS:-8} ]; then
+        MIN_RUN=\${O2_OAR_MIN_RUNTIME:-65}
+        [ "\$SECONDS" -ge "\$MIN_RUN" ] || sleep \$((MIN_RUN - SECONDS))
+        echo "[WARNING] file system stalled: requeue \$STALL/${O2_OAR_MAX_STALLS:-8} (exit 99, OAR resubmits the job)"
+        exit 99
+    fi
+    echo "[ERROR] file system still stalled after \$STALL requeues: giving up (O2_OAR_MAX_STALLS)"
+    RC=1
+fi
+[ "\$RC" -eq 0 ] && rm -f "\$SEG_FILE" "\$STALL_FILE"
 echo "[INFO] ===== OAR job \${OAR_JOB_ID:-?} ended at \$(date -u +%Y-%m-%dT%H:%M:%SZ) with exit status \$RC ====="
 exit \$RC
 OAREOF
     chmod +x "$OAR_SCRIPT"
-    rm -f "$LOG_DIR/.build_segments"   # a new submission starts a new build
+    # a new submission starts a new build: reset the counters and drop the per-segment
+    # logs (o2physics.partN.log) left over by the previous one
+    rm -f "$LOG_DIR/.build_segments" "$LOG_DIR/.build_stalls" "$LOG_DIR"/o2physics.part*.log
 
     local FLAGS="--project ${O2_OAR_PROJECT}"
     [ -n "${O2_OAR_TYPE:-}"       ] && FLAGS="$FLAGS -t ${O2_OAR_TYPE}"
